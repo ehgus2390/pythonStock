@@ -52,7 +52,26 @@ NAME_ALIASES = {
     "셀트리온": "068270.KS",
 }
 
-THEME_OPTIONS = ["없음", "로봇", "방산", "반도체", "항공/우주"]
+THEME_OPTIONS = [
+    "없음",
+    "로봇",
+    "방산",
+    "반도체",
+    "항공/우주",
+    "AI/소프트웨어",
+    "2차전지/배터리",
+    "전기차",
+    "바이오/제약",
+    "게임/콘텐츠",
+    "인터넷/플랫폼",
+    "통신/5G",
+    "에너지/원전",
+    "금융/은행",
+    "철강/소재",
+    "건설/인프라",
+    "해운/물류",
+    "소비재/유통",
+]
 FORECAST_MODELS = {
     "Baseline(추세)": "baseline",
     "ML-Ridge": "ridge",
@@ -64,6 +83,19 @@ THEME_KEYWORDS = {
     "방산": ["방산", "defense", "defence", "military", "무기"],
     "반도체": ["반도체", "semiconductor", "chip", "chips", "fab"],
     "항공/우주": ["항공", "우주", "aerospace", "space", "aviation"],
+    "AI/소프트웨어": ["ai", "artificial intelligence", "software", "cloud", "saas", "인공지능", "소프트웨어", "클라우드"],
+    "2차전지/배터리": ["2차전지", "배터리", "battery", "cathode", "anode", "lithium"],
+    "전기차": ["전기차", "ev", "electric vehicle", "자동차", "auto", "vehicle"],
+    "바이오/제약": ["바이오", "제약", "pharma", "biotech", "drug", "health"],
+    "게임/콘텐츠": ["게임", "game", "entertainment", "media", "content", "콘텐츠"],
+    "인터넷/플랫폼": ["인터넷", "platform", "portal", "e-commerce", "커머스", "플랫폼"],
+    "통신/5G": ["통신", "telecom", "5g", "network", "네트워크"],
+    "에너지/원전": ["에너지", "원전", "nuclear", "solar", "wind", "power", "utility"],
+    "금융/은행": ["금융", "은행", "bank", "financial", "insurance", "증권"],
+    "철강/소재": ["철강", "소재", "steel", "metal", "chemical", "material"],
+    "건설/인프라": ["건설", "infrastructure", "engineering", "cement", "플랜트"],
+    "해운/물류": ["해운", "물류", "shipping", "logistics", "transport"],
+    "소비재/유통": ["유통", "retail", "consumer", "food", "beverage", "화장품"],
 }
 
 THEME_KR_SEEDS = {
@@ -71,6 +103,19 @@ THEME_KR_SEEDS = {
     "방산": ["한화에어로스페이스", "한국항공우주", "LIG넥스원", "현대로템", "풍산", "빅텍"],
     "반도체": ["삼성전자", "SK하이닉스", "한미반도체", "DB하이텍", "주성엔지니어링", "원익IPS"],
     "항공/우주": ["한화에어로스페이스", "한국항공우주", "쎄트렉아이", "AP위성", "인텔리안테크", "제노코"],
+    "AI/소프트웨어": ["네이버", "카카오", "더존비즈온", "솔트룩스", "코난테크놀로지"],
+    "2차전지/배터리": ["LG에너지솔루션", "삼성SDI", "에코프로", "에코프로비엠", "포스코퓨처엠"],
+    "전기차": ["현대차", "기아", "만도", "HL만도", "명신산업"],
+    "바이오/제약": ["셀트리온", "삼성바이오로직스", "유한양행", "한미약품", "SK바이오사이언스"],
+    "게임/콘텐츠": ["엔씨소프트", "넷마블", "크래프톤", "펄어비스", "카카오게임즈"],
+    "인터넷/플랫폼": ["네이버", "카카오", "쿠팡", "NHN", "다날"],
+    "통신/5G": ["SK텔레콤", "KT", "LG유플러스", "케이엠더블유", "쏠리드"],
+    "에너지/원전": ["한국전력", "두산에너빌리티", "한전기술", "한전KPS", "씨에스윈드"],
+    "금융/은행": ["KB금융", "신한지주", "하나금융지주", "우리금융지주", "삼성화재"],
+    "철강/소재": ["POSCO홀딩스", "현대제철", "동국제강", "롯데케미칼", "금호석유"],
+    "건설/인프라": ["삼성물산", "현대건설", "DL이앤씨", "GS건설", "대우건설"],
+    "해운/물류": ["HMM", "팬오션", "대한해운", "CJ대한통운", "한진"],
+    "소비재/유통": ["아모레퍼시픽", "LG생활건강", "이마트", "롯데쇼핑", "CJ제일제당"],
 }
 
 THEME_US_SEEDS = {
@@ -78,6 +123,19 @@ THEME_US_SEEDS = {
     "방산": ["LMT", "NOC", "RTX", "GD", "LHX"],
     "반도체": ["NVDA", "AMD", "TSM", "AVGO", "INTC", "QCOM"],
     "항공/우주": ["BA", "RKLB", "SPCE", "LMT", "NOC", "RTX"],
+    "AI/소프트웨어": ["MSFT", "GOOGL", "META", "ORCL", "CRM", "PLTR"],
+    "2차전지/배터리": ["TSLA", "ALB", "QS", "ENVX", "LTHM"],
+    "전기차": ["TSLA", "RIVN", "LCID", "NIO", "XPEV", "GM", "F"],
+    "바이오/제약": ["LLY", "JNJ", "PFE", "MRNA", "REGN", "AMGN"],
+    "게임/콘텐츠": ["EA", "TTWO", "RBLX", "NFLX", "DIS", "WBD"],
+    "인터넷/플랫폼": ["AMZN", "META", "GOOGL", "UBER", "ABNB", "SHOP"],
+    "통신/5G": ["VZ", "T", "TMUS", "ERIC", "NOK"],
+    "에너지/원전": ["XOM", "CVX", "NEE", "DUK", "SMR", "CCJ"],
+    "금융/은행": ["JPM", "BAC", "WFC", "GS", "MS", "C"],
+    "철강/소재": ["NUE", "X", "AA", "FCX", "CLF"],
+    "건설/인프라": ["CAT", "DE", "URI", "VMC", "PWR"],
+    "해운/물류": ["UPS", "FDX", "ZIM", "MATX"],
+    "소비재/유통": ["WMT", "COST", "PG", "KO", "PEP", "MCD"],
 }
 
 
@@ -722,13 +780,13 @@ else:
 
 theme_choice = st.sidebar.selectbox("테마 카테고리", THEME_OPTIONS, index=0)
 
-input_label = "티커 또는 회사명"
-default_value = "AAPL" if market == "US" else "005930"
+if theme_choice != "없음":
+    input_label = "테마 내 회사명 필터(선택)"
+    default_value = ""
+else:
+    input_label = "티커 또는 회사명"
+    default_value = "AAPL" if market == "US" else "005930"
 user_input = st.sidebar.text_input(input_label, value=default_value).strip()
-
-detected_theme = detect_theme(user_input)
-if detected_theme != "없음" and theme_choice == "없음":
-    st.sidebar.caption(f"연관 키워드 감지: {detected_theme} (카테고리에서 선택 가능)")
 
 theme_candidates = filter_candidates_by_exchange(get_theme_candidates(theme_choice, market, limit=5000), market, exchange_choice)
 search_base_candidates = filter_candidates_by_exchange(
@@ -757,19 +815,10 @@ else:
         universe = filter_candidates_by_exchange(universe, market, exchange_choice)
         candidates_all = dedupe_rows(universe, limit=5000)
 
-st.sidebar.caption(f"검색 후보 총 {len(candidates_all)}개")
-page_size = st.sidebar.selectbox("후보 표시 수", [20, 50, 100, 200], index=2)
-total_pages = max(1, int(np.ceil(len(candidates_all) / page_size))) if candidates_all else 1
-candidate_page = int(
-    st.sidebar.number_input("후보 페이지", min_value=1, max_value=total_pages, value=1, step=1)
-)
-start_idx = (candidate_page - 1) * page_size
-candidates = candidates_all[start_idx : start_idx + page_size]
-st.sidebar.caption(f"현재 페이지: {candidate_page}/{total_pages}")
-
 theme_selected_symbol = ""
 if theme_choice != "없음" and theme_filtered_all:
     st.sidebar.markdown("**테마 관련회사 선택**")
+    st.sidebar.caption(f"테마 필터 후보 총 {len(theme_filtered_all)}개")
     theme_page_size = st.sidebar.selectbox("테마 표시 수", [20, 50, 100], index=1, key="theme_page_size")
     theme_total_pages = max(1, int(np.ceil(len(theme_filtered_all) / theme_page_size)))
     theme_page = int(
@@ -787,7 +836,20 @@ if theme_choice != "없음" and theme_filtered_all:
         st.sidebar.caption(f"테마 선택 티커: {theme_selected_symbol}")
 
 selected_symbol = ""
-if candidates_all and candidates:
+if theme_choice == "없음":
+    st.sidebar.caption(f"검색 후보 총 {len(candidates_all)}개")
+    page_size = st.sidebar.selectbox("후보 표시 수", [20, 50, 100, 200], index=2)
+    total_pages = max(1, int(np.ceil(len(candidates_all) / page_size))) if candidates_all else 1
+    candidate_page = int(
+        st.sidebar.number_input("후보 페이지", min_value=1, max_value=total_pages, value=1, step=1)
+    )
+    start_idx = (candidate_page - 1) * page_size
+    candidates = candidates_all[start_idx : start_idx + page_size]
+    st.sidebar.caption(f"현재 페이지: {candidate_page}/{total_pages}")
+else:
+    candidates = []
+
+if theme_choice == "없음" and candidates_all and candidates:
     option_labels = [
         f"{c['name']} | {c['symbol']} | {c['exchange']} | {c['currency']} | {c['price']}"
         for c in candidates
