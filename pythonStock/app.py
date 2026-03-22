@@ -1,4 +1,5 @@
 ﻿import datetime as dt
+import json
 from pathlib import Path
 
 import numpy as np
@@ -155,6 +156,68 @@ THEME_US_SEEDS = {
     "소비재/유통": ["WMT", "COST", "PG", "KO", "PEP", "MCD"],
 }
 
+
+APP_STATE_PATH = Path(__file__).resolve().parent / "user_state.json"
+
+
+def load_user_state() -> dict:
+    if not APP_STATE_PATH.exists():
+        return {"recent": [], "favorites": []}
+    try:
+        with APP_STATE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        recent = data.get("recent", [])
+        favorites = data.get("favorites", [])
+        return {
+            "recent": [str(x) for x in recent if str(x).strip()],
+            "favorites": [str(x) for x in favorites if str(x).strip()],
+        }
+    except Exception:
+        return {"recent": [], "favorites": []}
+
+
+def save_user_state(state: dict) -> None:
+    try:
+        APP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with APP_STATE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def add_recent_symbol(state: dict, symbol: str, limit: int = 30) -> dict:
+    sym = str(symbol).strip().upper()
+    if not sym:
+        return state
+    recent = [sym] + [x for x in state.get("recent", []) if str(x).upper() != sym]
+    state["recent"] = recent[:limit]
+    return state
+
+
+def convert_to_krw(price: float, currency: str, usdkrw: float | None) -> float | None:
+    if price is None or pd.isna(price):
+        return None
+    cur = str(currency).upper()
+    if cur in {"KRW", "KOR"}:
+        return float(price)
+    if cur in {"USD", "US$", "$"} and usdkrw is not None:
+        return float(price) * float(usdkrw)
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 30)
+def get_usdkrw_rate() -> float | None:
+    try:
+        fx = yf.download("KRW=X", period="5d", interval="1d", auto_adjust=False, progress=False)
+        if fx is None or fx.empty:
+            return None
+        if isinstance(fx.columns, pd.MultiIndex):
+            fx.columns = [x[0] for x in fx.columns]
+        if "Close" not in fx.columns:
+            return None
+        return float(fx["Close"].dropna().iloc[-1])
+    except Exception:
+        return None
 
 def dedupe_rows(rows: list[dict[str, str]], limit: int = 5000) -> list[dict[str, str]]:
     dedup = []
@@ -672,7 +735,7 @@ def run_backtest(df: pd.DataFrame) -> tuple[pd.Series, float, int, float]:
     return equity, total_return, trade_count, win_rate
 
 
-def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 63) -> dict | None:
+def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
     if ML_FORECAST_AVAILABLE and build_ml_forecast is not None:
         return build_ml_forecast(df, model_name=model_name, horizon_days=horizon_days)
 
@@ -701,11 +764,13 @@ def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days:
     ret_1m = (future[min(20, horizon_days - 1)] / last_price - 1) * 100
     ret_2m = (future[min(41, horizon_days - 1)] / last_price - 1) * 100
     ret_3m = (future[min(62, horizon_days - 1)] / last_price - 1) * 100
+    ret_6m = (future[min(125, horizon_days - 1)] / last_price - 1) * 100
+    ret_12m = (future[min(251, horizon_days - 1)] / last_price - 1) * 100
 
-    if ret_3m >= 3:
+    if ret_12m >= 8:
         signal = "BUY"
         signal_label = "예상 매수지점"
-    elif ret_3m <= -3:
+    elif ret_12m <= -8:
         signal = "SELL"
         signal_label = "예상 매도지점"
     else:
@@ -717,6 +782,8 @@ def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days:
         "ret_1m": ret_1m,
         "ret_2m": ret_2m,
         "ret_3m": ret_3m,
+        "ret_6m": ret_6m,
+        "ret_12m": ret_12m,
         "signal": signal,
         "signal_label": signal_label,
         "confidence": 50.0,
@@ -865,6 +932,10 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
 
 st.sidebar.header("설정")
+user_state = load_user_state()
+recent_symbols = user_state.get("recent", [])
+favorite_symbols = user_state.get("favorites", [])
+
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
     exchange_choice = st.sidebar.selectbox("거래소", ["전체", "KOSPI", "KOSDAQ", "KONEX"], index=0)
@@ -954,14 +1025,65 @@ if theme_choice == "없음" and candidates_all and candidates:
     selected_symbol = label_to_symbol[selected_label]
     st.sidebar.caption(f"선택 티커: {selected_symbol}")
 
+quick_symbol = ""
+st.sidebar.markdown("**최근 본 종목**")
+if recent_symbols:
+    for sym in recent_symbols[:10]:
+        if st.sidebar.button(f"최근: {sym}", key=f"recent_btn_{sym}"):
+            quick_symbol = sym
+else:
+    st.sidebar.caption("저장된 최근 종목이 없습니다.")
+
+st.sidebar.markdown("**즐겨찾기**")
+if favorite_symbols:
+    for sym in favorite_symbols[:10]:
+        if st.sidebar.button(f"★ {sym}", key=f"fav_btn_{sym}"):
+            quick_symbol = sym
+else:
+    st.sidebar.caption("즐겨찾기 종목이 없습니다.")
+
+candidate_symbol = theme_selected_symbol or selected_symbol
+if (not candidate_symbol) and user_input:
+    r_ticker, _ = resolve_ticker(user_input, market, kr_exchange)
+    candidate_symbol = r_ticker
+
+if candidate_symbol:
+    cand_upper = candidate_symbol.upper()
+    is_favorite = cand_upper in [x.upper() for x in favorite_symbols]
+    fav_label = "즐겨찾기 삭제" if is_favorite else "즐겨찾기 추가"
+    if st.sidebar.button(fav_label, key="fav_toggle_btn"):
+        favs = [x.upper() for x in favorite_symbols]
+        if is_favorite:
+            favs = [x for x in favs if x != cand_upper]
+        else:
+            favs = [cand_upper] + [x for x in favs if x != cand_upper]
+        user_state["favorites"] = favs[:50]
+        save_user_state(user_state)
+        st.rerun()
+
+show_kosdaq_list = False
+if market == "KR" and exchange_choice == "KOSDAQ":
+    kosdaq_rows = [r for r in get_krx_universe() if r.get("exchange") == "KOSDAQ"]
+    st.sidebar.caption(f"KOSDAQ 상장사 {len(kosdaq_rows)}개")
+    show_kosdaq_list = st.sidebar.toggle("KOSDAQ 전체 목록 보기", value=False)
+
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
-forecast_horizon_months = st.sidebar.selectbox("예측 기간(개월)", [1, 2, 3], index=2)
+forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", [3, 6, 12], index=2)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
-if st.sidebar.button("분석 시작"):
-    if theme_selected_symbol:
+run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol)
+
+if show_kosdaq_list:
+    with st.expander("KOSDAQ 상장사 전체 목록", expanded=False):
+        kdf = pd.DataFrame(kosdaq_rows)[["name", "symbol", "exchange", "currency"]]
+        st.dataframe(kdf, use_container_width=True, height=420)
+
+if run_requested:
+    if quick_symbol:
+        ticker, source = quick_symbol, "quick_menu"
+    elif theme_selected_symbol:
         ticker, source = theme_selected_symbol, "theme_menu"
     elif selected_symbol:
         ticker, source = selected_symbol, "autocomplete"
@@ -985,6 +1107,8 @@ if st.sidebar.button("분석 시작"):
         st.caption(
             f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        user_state = add_recent_symbol(user_state, resolved_symbol, limit=30)
+        save_user_state(user_state)
 
         chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
@@ -994,6 +1118,9 @@ if st.sidebar.button("분석 시작"):
             st.line_chart(df[["Close", "SMA20", "SMA60"]], use_container_width=True)
 
         latest = df.iloc[-1]
+        quote_currency = "KRW" if market == "KR" else "USD"
+        usdkrw_rate = get_usdkrw_rate()
+        krw_value = convert_to_krw(float(latest["Close"]), quote_currency, usdkrw_rate)
         if bool(latest["BuySignal"]):
             signal_text = "매수"
         elif bool(latest["SellSignal"]):
@@ -1003,20 +1130,38 @@ if st.sidebar.button("분석 시작"):
 
         if mobile_mode:
             st.metric("현재가", f"{latest['Close']:.2f}")
+            if krw_value is not None:
+                st.metric("원화 환산가", f"{krw_value:,.0f} KRW")
             st.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
             st.metric("최신 신호", signal_text)
         else:
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             col1.metric("현재가", f"{latest['Close']:.2f}")
-            col2.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
-            col3.metric("최신 신호", signal_text)
+            col2.metric("원화 환산가", f"{krw_value:,.0f} KRW" if krw_value is not None else "N/A")
+            col3.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
+            col4.metric("최신 신호", signal_text)
 
         if forecast is not None:
-            p1, p2, p3 = st.columns(3)
+            p1, p2, p3, p4, p5 = st.columns(5)
             p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
             p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
             p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
+            p4.metric("예상 수익률(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
+            p5.metric("예상 수익률(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
             st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
+
+            base_price = float(latest["Close"])
+            r1 = base_price * (forecast["ret_1m"] / 100.0)
+            r2 = base_price * (forecast["ret_2m"] / 100.0)
+            r3 = base_price * (forecast["ret_3m"] / 100.0)
+            r6 = base_price * (forecast.get("ret_6m", np.nan) / 100.0)
+            r12 = base_price * (forecast.get("ret_12m", np.nan) / 100.0)
+            a1, a2, a3, a4, a5 = st.columns(5)
+            a1.metric("예상 손익(1M)", f"{r1:,.2f}")
+            a2.metric("예상 손익(2M)", f"{r2:,.2f}")
+            a3.metric("예상 손익(3M)", f"{r3:,.2f}")
+            a4.metric("예상 손익(6M)", f"{r6:,.2f}" if pd.notna(r6) else "N/A")
+            a5.metric("예상 손익(1Y)", f"{r12:,.2f}" if pd.notna(r12) else "N/A")
             if pd.notna(forecast.get("mae", np.nan)):
                 m1, m2 = st.columns(2)
                 m1.metric("모델 MAE(일수익률)", f"{forecast['mae']:.3f}%")
@@ -1045,6 +1190,8 @@ else:
     st.info(
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
+
+
 
 
 
