@@ -81,7 +81,7 @@ THEME_US_SEEDS = {
 }
 
 
-def dedupe_rows(rows: list[dict[str, str]], limit: int = 20) -> list[dict[str, str]]:
+def dedupe_rows(rows: list[dict[str, str]], limit: int = 5000) -> list[dict[str, str]]:
     dedup = []
     seen = set()
     for item in rows:
@@ -95,6 +95,21 @@ def dedupe_rows(rows: list[dict[str, str]], limit: int = 20) -> list[dict[str, s
         if len(dedup) >= limit:
             break
     return dedup
+
+
+def filter_candidates_by_exchange(rows: list[dict[str, str]], market: str, exchange_choice: str) -> list[dict[str, str]]:
+    if exchange_choice == "전체":
+        return rows
+    out = []
+    for row in rows:
+        exch = str(row.get("exchange", ""))
+        if market == "KR":
+            if exch == exchange_choice:
+                out.append(row)
+        else:
+            if exch == exchange_choice:
+                out.append(row)
+    return out
 
 
 def detect_theme(query: str) -> str:
@@ -199,7 +214,7 @@ def get_us_universe() -> list[dict[str, str]]:
     return dedupe_rows(records, limit=20000)
 
 
-def get_theme_candidates(theme: str, market: str, limit: int = 20) -> list[dict[str, str]]:
+def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dict[str, str]]:
     if theme == "없음":
         return []
 
@@ -228,7 +243,7 @@ def get_theme_candidates(theme: str, market: str, limit: int = 20) -> list[dict[
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def search_candidates(query: str, market: str) -> list[dict[str, str]]:
+def search_candidates(query: str, market: str, max_results: int = 5000) -> list[dict[str, str]]:
     keyword = query.strip()
     if not keyword:
         return []
@@ -246,7 +261,7 @@ def search_candidates(query: str, market: str) -> list[dict[str, str]]:
                     matched.append(row)
             matched.sort(key=lambda x: (x["name"].replace(" ", "").lower() != key, x["name"]))
             if matched:
-                return matched[:20]
+                return matched[:max_results]
     else:
         us_rows = get_us_universe()
         if us_rows:
@@ -258,7 +273,7 @@ def search_candidates(query: str, market: str) -> list[dict[str, str]]:
                     matched.append(row)
             matched.sort(key=lambda x: (x["symbol"].lower() != key and x["name"].replace(" ", "").lower() != key, x["name"]))
             if matched:
-                return matched[:20]
+                return matched[:max_results]
 
     results: list[dict[str, str]] = []
     try:
@@ -294,7 +309,7 @@ def search_candidates(query: str, market: str) -> list[dict[str, str]]:
             if (not symbol.endswith(".KS")) and (not symbol.endswith(".KQ")) and q_type in {"EQUITY", "ETF", ""}:
                 results.append(item)
 
-    return dedupe_rows(results, limit=20)
+    return dedupe_rows(results, limit=max_results)
 
 
 def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, str]:
@@ -698,34 +713,60 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
 st.sidebar.header("설정")
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
-kr_exchange = st.sidebar.selectbox("KR 거래소(숫자 코드 입력 시)", ["KOSPI", "KOSDAQ"], index=0)
+if market == "KR":
+    exchange_choice = st.sidebar.selectbox("거래소", ["전체", "KOSPI", "KOSDAQ", "KONEX"], index=0)
+    kr_exchange = "KOSDAQ" if exchange_choice == "KOSDAQ" else "KOSPI"
+else:
+    exchange_choice = st.sidebar.selectbox("거래소", ["전체", "NASDAQ", "NYSE", "NYSE American", "NYSE Arca", "IEX", "BATS"], index=0)
+    kr_exchange = "KOSPI"
+
+theme_choice = st.sidebar.selectbox("테마 카테고리", THEME_OPTIONS, index=0)
+
 input_label = "티커 또는 회사명"
 default_value = "AAPL" if market == "US" else "005930"
 user_input = st.sidebar.text_input(input_label, value=default_value).strip()
 
 detected_theme = detect_theme(user_input)
-default_theme_idx = THEME_OPTIONS.index(detected_theme) if detected_theme in THEME_OPTIONS else 0
-theme_choice = st.sidebar.selectbox("테마 카테고리", THEME_OPTIONS, index=default_theme_idx)
-if detected_theme != "없음":
-    st.sidebar.caption(f"연관 키워드 감지: {detected_theme}")
+if detected_theme != "없음" and theme_choice == "없음":
+    st.sidebar.caption(f"연관 키워드 감지: {detected_theme} (카테고리에서 선택 가능)")
 
-theme_candidates = get_theme_candidates(theme_choice, market, limit=30)
-search_base_candidates = search_candidates(user_input, market) if len(user_input) >= 1 else []
+theme_candidates = filter_candidates_by_exchange(get_theme_candidates(theme_choice, market, limit=5000), market, exchange_choice)
+search_base_candidates = filter_candidates_by_exchange(
+    search_candidates(user_input, market, max_results=5000) if len(user_input) >= 1 else [],
+    market,
+    exchange_choice,
+)
 
+key = user_input.replace(" ", "").lower()
 if theme_choice != "없음":
-    key = user_input.replace(" ", "").lower()
+    base = theme_candidates
     filtered_theme = []
-    for row in theme_candidates:
+    for row in base:
         row_key = row["name"].replace(" ", "").lower()
         sym_key = row["symbol"].replace(".", "").lower()
         if (not key) or (key in row_key) or (key in sym_key):
             filtered_theme.append(row)
-    candidates = dedupe_rows(filtered_theme + search_base_candidates, limit=30)
+    candidates_all = dedupe_rows(filtered_theme, limit=5000)
 else:
-    candidates = search_base_candidates
+    if key:
+        candidates_all = dedupe_rows(search_base_candidates, limit=5000)
+    else:
+        universe = get_krx_universe() if market == "KR" else get_us_universe()
+        universe = filter_candidates_by_exchange(universe, market, exchange_choice)
+        candidates_all = dedupe_rows(universe, limit=5000)
+
+st.sidebar.caption(f"검색 후보 총 {len(candidates_all)}개")
+page_size = st.sidebar.selectbox("후보 표시 수", [20, 50, 100, 200], index=2)
+total_pages = max(1, int(np.ceil(len(candidates_all) / page_size))) if candidates_all else 1
+candidate_page = int(
+    st.sidebar.number_input("후보 페이지", min_value=1, max_value=total_pages, value=1, step=1)
+)
+start_idx = (candidate_page - 1) * page_size
+candidates = candidates_all[start_idx : start_idx + page_size]
+st.sidebar.caption(f"현재 페이지: {candidate_page}/{total_pages}")
 
 selected_symbol = ""
-if candidates:
+if candidates_all and candidates:
     option_labels = [
         f"{c['name']} | {c['symbol']} | {c['exchange']} | {c['currency']} | {c['price']}"
         for c in candidates
