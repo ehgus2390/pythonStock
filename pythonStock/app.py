@@ -1077,8 +1077,15 @@ run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol)
 
 if show_kosdaq_list:
     with st.expander("KOSDAQ 상장사 전체 목록", expanded=False):
-        kdf = pd.DataFrame(kosdaq_rows)[["name", "symbol", "exchange", "currency"]]
-        st.dataframe(kdf, use_container_width=True, height=420)
+        kdf = pd.DataFrame(kosdaq_rows)
+        if kdf.empty:
+            st.info("KOSDAQ 상장사 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하세요.")
+        else:
+            for col in ["name", "symbol", "exchange", "currency"]:
+                if col not in kdf.columns:
+                    kdf[col] = ""
+            kdf = kdf[["name", "symbol", "exchange", "currency"]]
+            st.dataframe(kdf, use_container_width=True, height=420)
 
 if run_requested:
     if quick_symbol:
