@@ -1,5 +1,6 @@
 ﻿import datetime as dt
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -24,7 +25,7 @@ except ModuleNotFoundError:
 
 
 st.set_page_config(page_title="Python Stock", layout="wide")
-st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호)")
+st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호 + 테마 + 1~3개월 예측)")
 
 
 NAME_ALIASES = {
@@ -43,6 +44,29 @@ NAME_ALIASES = {
     "셀트리온": "068270.KS",
 }
 
+THEME_OPTIONS = ["없음", "로봇", "방산", "반도체", "항공/우주"]
+
+THEME_KEYWORDS = {
+    "로봇": ["로봇", "robot", "automation", "자동화"],
+    "방산": ["방산", "defense", "defence", "military", "무기"],
+    "반도체": ["반도체", "semiconductor", "chip", "chips", "fab"],
+    "항공/우주": ["항공", "우주", "aerospace", "space", "aviation"],
+}
+
+THEME_KR_SEEDS = {
+    "로봇": ["휴림로봇", "레인보우로보틱스", "로보로보", "로보티즈", "에브리봇", "유진로봇"],
+    "방산": ["한화에어로스페이스", "한국항공우주", "LIG넥스원", "현대로템", "풍산", "빅텍"],
+    "반도체": ["삼성전자", "SK하이닉스", "한미반도체", "DB하이텍", "주성엔지니어링", "원익IPS"],
+    "항공/우주": ["한화에어로스페이스", "한국항공우주", "쎄트렉아이", "AP위성", "인텔리안테크", "제노코"],
+}
+
+THEME_US_SEEDS = {
+    "로봇": ["ISRG", "ROK", "ABB", "SYM", "TER"],
+    "방산": ["LMT", "NOC", "RTX", "GD", "LHX"],
+    "반도체": ["NVDA", "AMD", "TSM", "AVGO", "INTC", "QCOM"],
+    "항공/우주": ["BA", "RKLB", "SPCE", "LMT", "NOC", "RTX"],
+}
+
 
 def dedupe_rows(rows: list[dict[str, str]], limit: int = 20) -> list[dict[str, str]]:
     dedup = []
@@ -58,6 +82,16 @@ def dedupe_rows(rows: list[dict[str, str]], limit: int = 20) -> list[dict[str, s
         if len(dedup) >= limit:
             break
     return dedup
+
+
+def detect_theme(query: str) -> str:
+    q = query.strip().lower()
+    if not q:
+        return "없음"
+    for theme, keys in THEME_KEYWORDS.items():
+        if any(k in q for k in keys):
+            return theme
+    return "없음"
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -150,6 +184,34 @@ def get_us_universe() -> list[dict[str, str]]:
         pass
 
     return dedupe_rows(records, limit=20000)
+
+
+def get_theme_candidates(theme: str, market: str, limit: int = 20) -> list[dict[str, str]]:
+    if theme == "없음":
+        return []
+
+    if market == "KR":
+        rows = get_krx_universe()
+        seeds = set(THEME_KR_SEEDS.get(theme, []))
+        keys = [k.lower() for k in THEME_KEYWORDS.get(theme, [])]
+        matched = []
+        for row in rows:
+            name = row["name"]
+            lname = name.lower()
+            if (name in seeds) or any(k in lname for k in keys):
+                matched.append(row)
+        return dedupe_rows(matched, limit=limit)
+
+    rows = get_us_universe()
+    seeds = {s.upper() for s in THEME_US_SEEDS.get(theme, [])}
+    keys = [k.lower() for k in THEME_KEYWORDS.get(theme, [])]
+    matched = []
+    for row in rows:
+        name = row["name"].lower()
+        symbol = row["symbol"].upper()
+        if (symbol in seeds) or any(k in name for k in keys):
+            matched.append(row)
+    return dedupe_rows(matched, limit=limit)
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -372,7 +434,6 @@ def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_ex
             return df, f"yfinance:{sym}", sym
 
     if market == "KR":
-        # pykrx fallback is daily data; use when Yahoo is missing/incompatible.
         for sym in dedup_candidates:
             df = fetch_krx_ohlcv_pykrx(sym, period)
             if not df.empty:
@@ -430,7 +491,62 @@ def run_backtest(df: pd.DataFrame) -> tuple[pd.Series, float, int, float]:
     return equity, total_return, trade_count, win_rate
 
 
-def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool):
+def build_forecast(df: pd.DataFrame) -> dict | None:
+    close = df["Close"].dropna().astype(float)
+    if len(close) < 40:
+        return None
+
+    y = close.values
+    x = np.arange(len(y), dtype=float)
+    w = np.linspace(0.6, 1.4, len(y))
+
+    try:
+        slope, intercept = np.polyfit(x, y, 1, w=w)
+    except Exception:
+        return None
+
+    horizon = 63
+    fx = np.arange(len(y), len(y) + horizon, dtype=float)
+    future = intercept + slope * fx
+    future = np.maximum(future, 0.01)
+
+    last_idx = pd.Timestamp(df.index[-1])
+    if last_idx.tzinfo is not None:
+        last_idx = last_idx.tz_localize(None)
+    future_dates = pd.bdate_range(last_idx + pd.Timedelta(days=1), periods=horizon)
+    forecast_path = pd.DataFrame({"Forecast": future}, index=future_dates)
+
+    last_price = float(y[-1])
+    ret_1m = (future[20] / last_price - 1) * 100
+    ret_2m = (future[41] / last_price - 1) * 100
+    ret_3m = (future[62] / last_price - 1) * 100
+
+    returns = pd.Series(y).pct_change().dropna()
+    vol = float(returns.std()) if len(returns) > 5 else 0.01
+    confidence = min(95.0, max(5.0, abs(ret_3m) / max(vol * 100 * np.sqrt(63), 0.1) * 100))
+
+    if ret_3m >= 3:
+        signal = "BUY"
+        signal_label = "예상 매수지점"
+    elif ret_3m <= -3:
+        signal = "SELL"
+        signal_label = "예상 매도지점"
+    else:
+        signal = "HOLD"
+        signal_label = "관망"
+
+    return {
+        "path": forecast_path,
+        "ret_1m": ret_1m,
+        "ret_2m": ret_2m,
+        "ret_3m": ret_3m,
+        "signal": signal,
+        "signal_label": signal_label,
+        "confidence": confidence,
+    }
+
+
+def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict | None = None):
     if not PLOTLY_AVAILABLE:
         return None
     fig = make_subplots(
@@ -508,6 +624,39 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool):
         col=1,
     )
 
+    if forecast is not None:
+        fdf = forecast["path"]
+        up = forecast["signal"] == "BUY"
+        down = forecast["signal"] == "SELL"
+        fc_color = "#9ec5fe" if up else ("#ffc9c9" if down else "#ced4da")
+        marker_color = "#1971c2" if up else ("#c92a2a" if down else "#495057")
+
+        fig.add_trace(
+            go.Scatter(
+                x=fdf.index,
+                y=fdf["Forecast"],
+                mode="lines",
+                name="1~3개월 예측",
+                line=dict(color=fc_color, width=3, dash="dot"),
+            ),
+            row=1,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[df.index[-1]],
+                y=[df["Close"].iloc[-1]],
+                mode="markers+text",
+                name="예측 신호",
+                marker=dict(symbol="diamond", size=12, color=marker_color),
+                text=[forecast["signal_label"]],
+                textposition="top center",
+            ),
+            row=1,
+            col=1,
+        )
+
     fig.add_trace(
         go.Scatter(
             x=df.index,
@@ -541,7 +690,28 @@ kr_exchange = st.sidebar.selectbox("KR 거래소(숫자 코드 입력 시)", ["K
 input_label = "티커 또는 회사명"
 default_value = "AAPL" if market == "US" else "005930"
 user_input = st.sidebar.text_input(input_label, value=default_value).strip()
-candidates = search_candidates(user_input, market) if len(user_input) >= 1 else []
+
+detected_theme = detect_theme(user_input)
+default_theme_idx = THEME_OPTIONS.index(detected_theme) if detected_theme in THEME_OPTIONS else 0
+theme_choice = st.sidebar.selectbox("테마 카테고리", THEME_OPTIONS, index=default_theme_idx)
+if detected_theme != "없음":
+    st.sidebar.caption(f"연관 키워드 감지: {detected_theme}")
+
+theme_candidates = get_theme_candidates(theme_choice, market, limit=30)
+search_base_candidates = search_candidates(user_input, market) if len(user_input) >= 1 else []
+
+if theme_choice != "없음":
+    key = user_input.replace(" ", "").lower()
+    filtered_theme = []
+    for row in theme_candidates:
+        row_key = row["name"].replace(" ", "").lower()
+        sym_key = row["symbol"].replace(".", "").lower()
+        if (not key) or (key in row_key) or (key in sym_key):
+            filtered_theme.append(row)
+    candidates = dedupe_rows(filtered_theme + search_base_candidates, limit=30)
+else:
+    candidates = search_base_candidates
+
 selected_symbol = ""
 if candidates:
     option_labels = [
@@ -552,6 +722,7 @@ if candidates:
     selected_label = st.sidebar.selectbox("자동완성 후보", option_labels, index=0)
     selected_symbol = label_to_symbol[selected_label]
     st.sidebar.caption(f"선택 티커: {selected_symbol}")
+
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
@@ -572,12 +743,14 @@ if st.sidebar.button("분석 시작"):
         st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
         df = add_indicators(raw)
+        forecast = build_forecast(df)
+
         st.success(f"{resolved_symbol} 분석 완료")
         st.caption(
             f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-        chart = build_chart(df, resolved_symbol, mobile_mode)
+        chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
             st.plotly_chart(chart, use_container_width=True)
         else:
@@ -602,6 +775,13 @@ if st.sidebar.button("분석 시작"):
             col2.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
             col3.metric("최신 신호", signal_text)
 
+        if forecast is not None:
+            p1, p2, p3 = st.columns(3)
+            p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
+            p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
+            p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
+            st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
+
         equity, total_return, trade_count, win_rate = run_backtest(df)
 
         if mobile_mode:
@@ -622,4 +802,6 @@ if st.sidebar.button("분석 시작"):
         signal_table = df.loc[df["BuySignal"] | df["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
         st.dataframe(signal_table, use_container_width=True)
 else:
-    st.info("왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930")
+    st.info(
+        "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
+    )
