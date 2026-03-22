@@ -3,8 +3,10 @@
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
 try:
     from pykrx import stock as krx_stock
+
     KRX_AVAILABLE = True
 except ModuleNotFoundError:
     krx_stock = None
@@ -13,6 +15,7 @@ except ModuleNotFoundError:
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+
     PLOTLY_AVAILABLE = True
 except ModuleNotFoundError:
     go = None
@@ -39,6 +42,22 @@ NAME_ALIASES = {
     "현대차": "005380.KS",
     "셀트리온": "068270.KS",
 }
+
+
+def dedupe_rows(rows: list[dict[str, str]], limit: int = 20) -> list[dict[str, str]]:
+    dedup = []
+    seen = set()
+    for item in rows:
+        symbol = item.get("symbol", "")
+        if not symbol:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        dedup.append(item)
+        if len(dedup) >= limit:
+            break
+    return dedup
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -76,29 +95,99 @@ def get_krx_universe() -> list[dict[str, str]]:
     return records
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def get_us_universe() -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    exchange_map = {
+        "A": "NYSE American",
+        "N": "NYSE",
+        "P": "NYSE Arca",
+        "Q": "NASDAQ",
+        "V": "IEX",
+        "Z": "BATS",
+    }
+
+    try:
+        nasdaq_df = pd.read_csv("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", sep="|")
+        nasdaq_df = nasdaq_df[nasdaq_df["Symbol"].notna()]
+        nasdaq_df = nasdaq_df[nasdaq_df["Symbol"] != "File Creation Time"]
+        for _, row in nasdaq_df.iterrows():
+            symbol = str(row.get("Symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            records.append(
+                {
+                    "name": str(row.get("Security Name", symbol)).strip(),
+                    "symbol": symbol,
+                    "exchange": "NASDAQ",
+                    "currency": "USD",
+                    "price": "-",
+                }
+            )
+    except Exception:
+        pass
+
+    try:
+        other_df = pd.read_csv("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", sep="|")
+        other_df = other_df[other_df["ACT Symbol"].notna()]
+        other_df = other_df[other_df["ACT Symbol"] != "File Creation Time"]
+        for _, row in other_df.iterrows():
+            symbol = str(row.get("ACT Symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            exch_code = str(row.get("Exchange", "")).strip().upper()
+            exchange = exchange_map.get(exch_code, exch_code or "US")
+            records.append(
+                {
+                    "name": str(row.get("Security Name", symbol)).strip(),
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "currency": "USD",
+                    "price": "-",
+                }
+            )
+    except Exception:
+        pass
+
+    return dedupe_rows(records, limit=20000)
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def search_candidates(query: str, market: str) -> list[dict[str, str]]:
     keyword = query.strip()
     if not keyword:
         return []
 
+    key = keyword.replace(" ", "").lower()
+
     if market == "KR":
         krx_rows = get_krx_universe()
         if krx_rows:
-            key = keyword.replace(" ", "").lower()
             matched = []
             for row in krx_rows:
                 row_key = row["name"].replace(" ", "").lower()
                 symbol_key = row["symbol"].replace(".", "").lower()
                 if key in row_key or key in symbol_key:
                     matched.append(row)
-            # Exact match first for better UX.
             matched.sort(key=lambda x: (x["name"].replace(" ", "").lower() != key, x["name"]))
-            return matched[:20]
+            if matched:
+                return matched[:20]
+    else:
+        us_rows = get_us_universe()
+        if us_rows:
+            matched = []
+            for row in us_rows:
+                row_key = row["name"].replace(" ", "").lower()
+                symbol_key = row["symbol"].lower()
+                if key in row_key or key in symbol_key:
+                    matched.append(row)
+            matched.sort(key=lambda x: (x["symbol"].lower() != key and x["name"].replace(" ", "").lower() != key, x["name"]))
+            if matched:
+                return matched[:20]
 
     results: list[dict[str, str]] = []
     try:
-        quotes = yf.Search(keyword, max_results=12).quotes or []
+        quotes = yf.Search(keyword, max_results=20).quotes or []
     except Exception:
         quotes = []
 
@@ -130,19 +219,10 @@ def search_candidates(query: str, market: str) -> list[dict[str, str]]:
             if (not symbol.endswith(".KS")) and (not symbol.endswith(".KQ")) and q_type in {"EQUITY", "ETF", ""}:
                 results.append(item)
 
-    # Remove duplicates while preserving order.
-    dedup = []
-    seen = set()
-    for item in results:
-        symbol = item["symbol"]
-        if symbol not in seen:
-            seen.add(symbol)
-            dedup.append(item)
-    return dedup[:8]
+    return dedupe_rows(results, limit=20)
 
 
 def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, str]:
-    """Return resolved symbol and source label."""
     query = raw_input.strip()
     if not query:
         return "", "empty"
@@ -157,8 +237,9 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, 
         suffix = ".KS" if kr_exchange == "KOSPI" else ".KQ"
         return f"{symbol}{suffix}", "kr_code"
 
+    key = query.replace(" ", "").lower()
+
     if market == "KR":
-        key = query.replace(" ", "").lower()
         for row in get_krx_universe():
             row_key = row["name"].replace(" ", "").lower()
             if row_key == key:
@@ -167,12 +248,21 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, 
             row_key = row["name"].replace(" ", "").lower()
             if key and key in row_key:
                 return row["symbol"], "krx_partial"
+    else:
+        for row in get_us_universe():
+            row_name = row["name"].replace(" ", "").lower()
+            row_symbol = row["symbol"].lower()
+            if key == row_symbol or key == row_name:
+                return row["symbol"], "us_exact"
+        for row in get_us_universe():
+            row_name = row["name"].replace(" ", "").lower()
+            row_symbol = row["symbol"].lower()
+            if key and (key in row_name or key in row_symbol):
+                return row["symbol"], "us_partial"
 
-    # Obvious ticker formats: use directly.
     if "." in symbol or (symbol.isalnum() and len(symbol) <= 6 and symbol == symbol.upper()):
         return symbol, "direct"
 
-    # Fallback: try company-name search.
     try:
         search = yf.Search(query, max_results=10)
         quotes = search.quotes or []
@@ -390,7 +480,7 @@ if st.sidebar.button("분석 시작"):
     raw = normalize_columns(raw)
 
     if raw.empty:
-        st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930")
+        st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
         df = add_indicators(raw)
         st.success(f"{ticker} 분석 완료")
@@ -441,4 +531,4 @@ if st.sidebar.button("분석 시작"):
         signal_table = df.loc[df["BuySignal"] | df["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
         st.dataframe(signal_table, use_container_width=True)
 else:
-    st.info("왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, AAPL, 005930")
+    st.info("왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930")
