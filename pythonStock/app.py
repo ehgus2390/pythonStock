@@ -381,6 +381,95 @@ def get_us_universe() -> list[dict[str, str]]:
     return dedupe_rows(records, limit=20000)
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def get_krx_index_constituents(index_key: str) -> list[dict[str, str]]:
+    """
+    index_key: 'KOSPI50' or 'KOSDAQ100'
+    """
+    target_name_map = {
+        "KOSPI50": ["코스피 50", "코스피50", "KOSPI 50"],
+        "KOSDAQ100": ["코스닥 100", "코스닥100", "KOSDAQ 100"],
+    }
+    target_market_map = {
+        "KOSPI50": "KOSPI",
+        "KOSDAQ100": "KOSDAQ",
+    }
+    target_size_map = {
+        "KOSPI50": 50,
+        "KOSDAQ100": 100,
+    }
+
+    rows = get_krx_universe()
+    by_code = {}
+    for r in rows:
+        code = str(r.get("symbol", "")).split(".")[0]
+        if len(code) == 6 and code.isdigit():
+            by_code[code] = r
+
+    out: list[dict[str, str]] = []
+    code_set: set[str] = set()
+
+    # 1) primary: pykrx index constituents
+    if KRX_AVAILABLE:
+        try:
+            idx_markets = ["KOSPI", "KOSDAQ", "KRX", "테마"]
+            matched_idx = None
+            for mk in idx_markets:
+                tickers = krx_stock.get_index_ticker_list(market=mk)
+                for idx_t in tickers:
+                    idx_name = krx_stock.get_index_ticker_name(idx_t)
+                    if any(k in str(idx_name) for k in target_name_map.get(index_key, [])):
+                        matched_idx = idx_t
+                        break
+                if matched_idx:
+                    break
+
+            if matched_idx:
+                members = krx_stock.get_index_portfolio_deposit_file(matched_idx) or []
+                for code in members:
+                    code = str(code).zfill(6)
+                    if len(code) == 6 and code.isdigit():
+                        code_set.add(code)
+        except Exception:
+            pass
+
+    # 2) fallback: top market-cap by exchange
+    if not code_set and FDR_AVAILABLE:
+        try:
+            market_name = target_market_map[index_key]
+            top_n = target_size_map[index_key]
+            listing = fdr.StockListing(market_name)
+            if not listing.empty and "Code" in listing.columns and "Name" in listing.columns:
+                if "Marcap" in listing.columns:
+                    listing = listing.sort_values("Marcap", ascending=False)
+                listing = listing.head(top_n)
+                for _, rr in listing.iterrows():
+                    code = str(rr.get("Code", "")).zfill(6)
+                    if len(code) == 6 and code.isdigit():
+                        code_set.add(code)
+        except Exception:
+            pass
+
+    # build rows
+    for code in sorted(code_set):
+        if code in by_code:
+            out.append(by_code[code])
+        else:
+            suffix = ".KQ" if index_key == "KOSDAQ100" else ".KS"
+            exch = "KOSDAQ" if index_key == "KOSDAQ100" else "KOSPI"
+            out.append(
+                {
+                    "name": code,
+                    "symbol": f"{code}{suffix}",
+                    "exchange": exch,
+                    "currency": "KRW",
+                    "price": "-",
+                }
+            )
+
+    return dedupe_rows(out, limit=2000)
+
+
 def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dict[str, str]]:
     if theme == "없음":
         return []
@@ -940,9 +1029,11 @@ market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
     exchange_choice = st.sidebar.selectbox("거래소", ["전체", "KOSPI", "KOSDAQ", "KONEX"], index=0)
     kr_exchange = "KOSDAQ" if exchange_choice == "KOSDAQ" else "KOSPI"
+    index_basket_label = st.sidebar.selectbox("대표지수 구성종목", ["없음", "KOSPI 50", "KOSDAQ 100"], index=0)
 else:
     exchange_choice = st.sidebar.selectbox("거래소", ["전체", "NASDAQ", "NYSE", "NYSE American", "NYSE Arca", "IEX", "BATS"], index=0)
     kr_exchange = "KOSPI"
+    index_basket_label = "없음"
 
 theme_choice = st.sidebar.selectbox("테마 카테고리", THEME_OPTIONS, index=0)
 
@@ -960,6 +1051,12 @@ search_base_candidates = filter_candidates_by_exchange(
     market,
     exchange_choice,
 )
+
+index_basket_rows: list[dict[str, str]] = []
+if market == "KR" and index_basket_label != "없음":
+    idx_key = "KOSPI50" if index_basket_label == "KOSPI 50" else "KOSDAQ100"
+    index_basket_rows = get_krx_index_constituents(idx_key)
+    st.sidebar.caption(f"{index_basket_label} 구성종목 {len(index_basket_rows)}개")
 
 key = user_input.replace(" ", "").lower()
 theme_filtered_all: list[dict[str, str]] = []
@@ -981,6 +1078,15 @@ else:
         universe = filter_candidates_by_exchange(universe, market, exchange_choice)
         candidates_all = dedupe_rows(universe, limit=5000)
 
+if index_basket_rows:
+    idx_filtered = []
+    for row in index_basket_rows:
+        row_key = row["name"].replace(" ", "").lower()
+        sym_key = row["symbol"].replace(".", "").lower()
+        if (not key) or (key in row_key) or (key in sym_key):
+            idx_filtered.append(row)
+    candidates_all = dedupe_rows(idx_filtered, limit=5000)
+
 theme_selected_symbol = ""
 if theme_choice != "없음" and theme_filtered_all:
     st.sidebar.markdown("**테마 관련회사 선택**")
@@ -1000,6 +1106,25 @@ if theme_choice != "없음" and theme_filtered_all:
     if theme_choice_label != "선택 안함":
         theme_selected_symbol = theme_choice_label.split("|")[1].strip()
         st.sidebar.caption(f"테마 선택 티커: {theme_selected_symbol}")
+
+index_selected_symbol = ""
+if index_basket_rows:
+    st.sidebar.markdown("**지수 구성종목 선택**")
+    index_page_size = st.sidebar.selectbox("지수 표시 수", [20, 50, 100], index=1, key="index_page_size")
+    index_total_pages = max(1, int(np.ceil(len(index_basket_rows) / index_page_size)))
+    index_page = int(
+        st.sidebar.number_input("지수 페이지", min_value=1, max_value=index_total_pages, value=1, step=1, key="index_page")
+    )
+    i_start = (index_page - 1) * index_page_size
+    index_page_rows = index_basket_rows[i_start : i_start + index_page_size]
+    st.sidebar.caption(f"지수 후보 {len(index_basket_rows)}개 / 현재 {index_page}/{index_total_pages}")
+    index_option_labels = ["선택 안함"] + [
+        f"{c['name']} | {c['symbol']} | {c['exchange']}" for c in index_page_rows
+    ]
+    index_choice_label = st.sidebar.selectbox("지수 회사", index_option_labels, index=0, key="index_company_select")
+    if index_choice_label != "선택 안함":
+        index_selected_symbol = index_choice_label.split("|")[1].strip()
+        st.sidebar.caption(f"지수 선택 티커: {index_selected_symbol}")
 
 selected_symbol = ""
 if theme_choice == "없음":
@@ -1042,7 +1167,7 @@ if favorite_symbols:
 else:
     st.sidebar.caption("즐겨찾기 종목이 없습니다.")
 
-candidate_symbol = theme_selected_symbol or selected_symbol
+candidate_symbol = index_selected_symbol or theme_selected_symbol or selected_symbol
 if (not candidate_symbol) and user_input:
     r_ticker, _ = resolve_ticker(user_input, market, kr_exchange)
     candidate_symbol = r_ticker
@@ -1090,6 +1215,8 @@ if show_kosdaq_list:
 if run_requested:
     if quick_symbol:
         ticker, source = quick_symbol, "quick_menu"
+    elif index_selected_symbol:
+        ticker, source = index_selected_symbol, "index_menu"
     elif theme_selected_symbol:
         ticker, source = theme_selected_symbol, "theme_menu"
     elif selected_symbol:
