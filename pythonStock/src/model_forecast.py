@@ -2,7 +2,21 @@
 import pandas as pd
 
 
-def _baseline_forecast(df: pd.DataFrame, horizon_days: int = 63) -> dict | None:
+def _calc_horizon_returns(future: np.ndarray, last_price: float, horizon_days: int) -> dict[str, float]:
+    idx_map = {
+        "ret_1m": min(20, horizon_days - 1),
+        "ret_2m": min(41, horizon_days - 1),
+        "ret_3m": min(62, horizon_days - 1),
+        "ret_6m": min(125, horizon_days - 1),
+        "ret_12m": min(251, horizon_days - 1),
+    }
+    out: dict[str, float] = {}
+    for key, idx in idx_map.items():
+        out[key] = (future[idx] / last_price - 1) * 100
+    return out
+
+
+def _baseline_forecast(df: pd.DataFrame, horizon_days: int = 252) -> dict | None:
     close = df["Close"].dropna().astype(float)
     if len(close) < 40:
         return None
@@ -26,18 +40,16 @@ def _baseline_forecast(df: pd.DataFrame, horizon_days: int = 63) -> dict | None:
     forecast_path = pd.DataFrame({"Forecast": future}, index=future_dates)
 
     last_price = float(y[-1])
-    ret_1m = (future[min(20, horizon_days - 1)] / last_price - 1) * 100
-    ret_2m = (future[min(41, horizon_days - 1)] / last_price - 1) * 100
-    ret_3m = (future[min(62, horizon_days - 1)] / last_price - 1) * 100
+    rets = _calc_horizon_returns(future, last_price, horizon_days)
 
     returns = pd.Series(y).pct_change().dropna()
     vol = float(returns.std()) if len(returns) > 5 else 0.01
-    confidence = min(95.0, max(5.0, abs(ret_3m) / max(vol * 100 * np.sqrt(63), 0.1) * 100))
+    confidence = min(95.0, max(5.0, abs(rets["ret_12m"]) / max(vol * 100 * np.sqrt(252), 0.1) * 100))
 
-    if ret_3m >= 3:
+    if rets["ret_12m"] >= 8:
         signal = "BUY"
         signal_label = "예상 매수지점"
-    elif ret_3m <= -3:
+    elif rets["ret_12m"] <= -8:
         signal = "SELL"
         signal_label = "예상 매도지점"
     else:
@@ -46,9 +58,7 @@ def _baseline_forecast(df: pd.DataFrame, horizon_days: int = 63) -> dict | None:
 
     return {
         "path": forecast_path,
-        "ret_1m": ret_1m,
-        "ret_2m": ret_2m,
-        "ret_3m": ret_3m,
+        **rets,
         "signal": signal,
         "signal_label": signal_label,
         "confidence": confidence,
@@ -128,14 +138,12 @@ def _fit_predict_ml(df: pd.DataFrame, model_name: str, horizon_days: int) -> dic
     future_dates = pd.bdate_range(last_idx + pd.Timedelta(days=1), periods=horizon_days)
     forecast_path = pd.DataFrame({"Forecast": future}, index=future_dates)
 
-    ret_1m = (future[min(20, horizon_days - 1)] / last_price - 1) * 100
-    ret_2m = (future[min(41, horizon_days - 1)] / last_price - 1) * 100
-    ret_3m = (future[min(62, horizon_days - 1)] / last_price - 1) * 100
+    rets = _calc_horizon_returns(future, last_price, horizon_days)
 
-    if ret_3m >= 3:
+    if rets["ret_12m"] >= 8:
         signal = "BUY"
         signal_label = "예상 매수지점"
-    elif ret_3m <= -3:
+    elif rets["ret_12m"] <= -8:
         signal = "SELL"
         signal_label = "예상 매도지점"
     else:
@@ -146,9 +154,7 @@ def _fit_predict_ml(df: pd.DataFrame, model_name: str, horizon_days: int) -> dic
 
     return {
         "path": forecast_path,
-        "ret_1m": ret_1m,
-        "ret_2m": ret_2m,
-        "ret_3m": ret_3m,
+        **rets,
         "signal": signal,
         "signal_label": signal_label,
         "confidence": confidence,
@@ -158,7 +164,7 @@ def _fit_predict_ml(df: pd.DataFrame, model_name: str, horizon_days: int) -> dic
     }
 
 
-def build_ml_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 63) -> dict | None:
+def build_ml_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
     if model_name == "baseline":
         return _baseline_forecast(df, horizon_days=horizon_days)
 
@@ -166,5 +172,4 @@ def build_ml_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_da
     if ml is not None:
         return ml
 
-    # Fallback for environments without sklearn or too-short history.
     return _baseline_forecast(df, horizon_days=horizon_days)
