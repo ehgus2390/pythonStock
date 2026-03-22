@@ -281,12 +281,31 @@ def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dic
         seeds = set(THEME_KR_SEEDS.get(theme, []))
         keys = [k.lower() for k in THEME_KEYWORDS.get(theme, [])]
         matched = []
-        for row in rows:
-            name = row["name"]
-            lname = name.lower()
-            if (name in seeds) or any(k in lname for k in keys):
-                matched.append(row)
-        return dedupe_rows(matched, limit=limit)
+
+        # Primary path: full KRX universe match
+        if rows:
+            seed_norm = {s.replace(" ", "").lower() for s in seeds}
+            for row in rows:
+                name = row["name"]
+                lname = name.lower()
+                nkey = name.replace(" ", "").lower()
+                if (nkey in seed_norm) or any(k in lname for k in keys):
+                    matched.append(row)
+            return dedupe_rows(matched, limit=limit)
+
+        # Fallback path: when pykrx universe is unavailable on runtime
+        # Use seed names + keyword search through Yahoo lookup.
+        fallback_rows: list[dict[str, str]] = []
+        for seed_name in THEME_KR_SEEDS.get(theme, []):
+            seed_matches = search_candidates(seed_name, "KR", max_results=50)
+            fallback_rows.extend(seed_matches)
+
+        for k in keys:
+            if len(k) >= 2 and not k.isascii():
+                key_matches = search_candidates(k, "KR", max_results=50)
+                fallback_rows.extend(key_matches)
+
+        return dedupe_rows(fallback_rows, limit=limit)
 
     rows = get_us_universe()
     seeds = {s.upper() for s in THEME_US_SEEDS.get(theme, [])}
