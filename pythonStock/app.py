@@ -1,4 +1,5 @@
 ﻿import datetime as dt
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,14 @@ try:
 except ModuleNotFoundError:
     krx_stock = None
     KRX_AVAILABLE = False
+
+try:
+    import FinanceDataReader as fdr
+
+    FDR_AVAILABLE = True
+except ModuleNotFoundError:
+    fdr = None
+    FDR_AVAILABLE = False
 
 try:
     import plotly.graph_objects as go
@@ -30,6 +39,14 @@ try:
 except Exception:
     build_ml_forecast = None
     ML_FORECAST_AVAILABLE = False
+
+try:
+    _yf_cache = Path(__file__).resolve().parent / ".cache" / "yfinance"
+    _yf_cache.mkdir(parents=True, exist_ok=True)
+    if hasattr(yf, "set_tz_cache_location"):
+        yf.set_tz_cache_location(str(_yf_cache))
+except Exception:
+    pass
 
 
 st.set_page_config(page_title="Python Stock", layout="wide")
@@ -182,36 +199,65 @@ def detect_theme(query: str) -> str:
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def get_krx_universe() -> list[dict[str, str]]:
-    if not KRX_AVAILABLE:
-        return []
-
     records: list[dict[str, str]] = []
-    market_specs = [
-        ("KOSPI", ".KS"),
-        ("KOSDAQ", ".KQ"),
-        ("KONEX", ".KQ"),
-    ]
-    for market_name, suffix in market_specs:
-        try:
-            tickers = krx_stock.get_market_ticker_list(market=market_name)
-        except Exception:
-            tickers = []
-        for ticker in tickers:
+    if KRX_AVAILABLE:
+        market_specs = [
+            ("KOSPI", ".KS"),
+            ("KOSDAQ", ".KQ"),
+            ("KONEX", ".KQ"),
+        ]
+        for market_name, suffix in market_specs:
             try:
-                name = krx_stock.get_market_ticker_name(ticker)
+                tickers = krx_stock.get_market_ticker_list(market=market_name)
             except Exception:
-                continue
-            if not name:
-                continue
-            records.append(
-                {
-                    "name": str(name).strip(),
-                    "symbol": f"{ticker}{suffix}",
-                    "exchange": market_name,
-                    "currency": "KRW",
-                    "price": "-",
-                }
-            )
+                tickers = []
+            for ticker in tickers:
+                try:
+                    name = krx_stock.get_market_ticker_name(ticker)
+                except Exception:
+                    continue
+                if not name:
+                    continue
+                records.append(
+                    {
+                        "name": str(name).strip(),
+                        "symbol": f"{ticker}{suffix}",
+                        "exchange": market_name,
+                        "currency": "KRW",
+                        "price": "-",
+                    }
+                )
+
+    if (not records) and FDR_AVAILABLE:
+        try:
+            krx_df = fdr.StockListing("KRX")
+        except Exception:
+            krx_df = pd.DataFrame()
+        if not krx_df.empty:
+            for _, row in krx_df.iterrows():
+                code = str(row.get("Code", "")).zfill(6)
+                name = str(row.get("Name", "")).strip()
+                market_name = str(row.get("Market", "")).upper()
+                if len(code) != 6 or not name:
+                    continue
+                if "KOSDAQ" in market_name:
+                    suffix = ".KQ"
+                    exch = "KOSDAQ"
+                elif "KONEX" in market_name:
+                    suffix = ".KQ"
+                    exch = "KONEX"
+                else:
+                    suffix = ".KS"
+                    exch = "KOSPI"
+                records.append(
+                    {
+                        "name": name,
+                        "symbol": f"{code}{suffix}",
+                        "exchange": exch,
+                        "currency": "KRW",
+                        "price": "-",
+                    }
+                )
     return records
 
 
@@ -510,6 +556,32 @@ def fetch_krx_ohlcv_pykrx(symbol: str, period: str) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
+def fetch_krx_ohlcv_fdr(symbol: str, period: str) -> pd.DataFrame:
+    if not FDR_AVAILABLE:
+        return pd.DataFrame()
+    ticker = symbol.split(".")[0]
+    if (not ticker.isdigit()) or len(ticker) != 6:
+        return pd.DataFrame()
+
+    end_date = dt.date.today()
+    start_date = end_date - dt.timedelta(days=period_to_days(period))
+    try:
+        df = fdr.DataReader(ticker, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+    needed = ["Open", "High", "Low", "Close"]
+    for col in needed:
+        if col not in df.columns:
+            return pd.DataFrame()
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+    df.index = pd.to_datetime(df.index)
+    return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
 def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_exchange: str) -> tuple[pd.DataFrame, str, str]:
     tried: list[str] = []
     candidates: list[str] = []
@@ -543,6 +615,10 @@ def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_ex
             df = fetch_krx_ohlcv_pykrx(sym, period)
             if not df.empty:
                 return df, f"pykrx:{sym}(interval=1d)", sym
+        for sym in dedup_candidates:
+            df = fetch_krx_ohlcv_fdr(sym, period)
+            if not df.empty:
+                return df, f"fdr:{sym}(interval=1d)", sym
 
     return pd.DataFrame(), f"failed:{','.join(tried)}", ticker
 
@@ -969,3 +1045,6 @@ else:
     st.info(
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
+
+
+
