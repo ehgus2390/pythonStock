@@ -738,6 +738,7 @@ search_base_candidates = filter_candidates_by_exchange(
 )
 
 key = user_input.replace(" ", "").lower()
+theme_filtered_all: list[dict[str, str]] = []
 if theme_choice != "없음":
     base = theme_candidates
     filtered_theme = []
@@ -746,7 +747,8 @@ if theme_choice != "없음":
         sym_key = row["symbol"].replace(".", "").lower()
         if (not key) or (key in row_key) or (key in sym_key):
             filtered_theme.append(row)
-    candidates_all = dedupe_rows(filtered_theme, limit=5000)
+    theme_filtered_all = dedupe_rows(filtered_theme, limit=5000)
+    candidates_all = theme_filtered_all
 else:
     if key:
         candidates_all = dedupe_rows(search_base_candidates, limit=5000)
@@ -764,6 +766,25 @@ candidate_page = int(
 start_idx = (candidate_page - 1) * page_size
 candidates = candidates_all[start_idx : start_idx + page_size]
 st.sidebar.caption(f"현재 페이지: {candidate_page}/{total_pages}")
+
+theme_selected_symbol = ""
+if theme_choice != "없음" and theme_filtered_all:
+    st.sidebar.markdown("**테마 관련회사 선택**")
+    theme_page_size = st.sidebar.selectbox("테마 표시 수", [20, 50, 100], index=1, key="theme_page_size")
+    theme_total_pages = max(1, int(np.ceil(len(theme_filtered_all) / theme_page_size)))
+    theme_page = int(
+        st.sidebar.number_input("테마 페이지", min_value=1, max_value=theme_total_pages, value=1, step=1, key="theme_page")
+    )
+    t_start = (theme_page - 1) * theme_page_size
+    theme_page_rows = theme_filtered_all[t_start : t_start + theme_page_size]
+    st.sidebar.caption(f"테마 후보 {len(theme_filtered_all)}개 / 현재 {theme_page}/{theme_total_pages}")
+    theme_option_labels = ["선택 안함"] + [
+        f"{c['name']} | {c['symbol']} | {c['exchange']}" for c in theme_page_rows
+    ]
+    theme_choice_label = st.sidebar.selectbox("테마 회사", theme_option_labels, index=0, key="theme_company_select")
+    if theme_choice_label != "선택 안함":
+        theme_selected_symbol = theme_choice_label.split("|")[1].strip()
+        st.sidebar.caption(f"테마 선택 티커: {theme_selected_symbol}")
 
 selected_symbol = ""
 if candidates_all and candidates:
@@ -783,7 +804,9 @@ forecast_horizon_months = st.sidebar.selectbox("예측 기간(개월)", [1, 2, 3
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
 if st.sidebar.button("분석 시작"):
-    if selected_symbol:
+    if theme_selected_symbol:
+        ticker, source = theme_selected_symbol, "theme_menu"
+    elif selected_symbol:
         ticker, source = selected_symbol, "autocomplete"
     else:
         ticker, source = resolve_ticker(user_input, market, kr_exchange)
