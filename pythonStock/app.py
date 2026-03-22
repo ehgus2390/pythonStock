@@ -4,6 +4,13 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 try:
+    from pykrx import stock as krx_stock
+    KRX_AVAILABLE = True
+except ModuleNotFoundError:
+    krx_stock = None
+    KRX_AVAILABLE = False
+
+try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     PLOTLY_AVAILABLE = True
@@ -34,11 +41,60 @@ NAME_ALIASES = {
 }
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def get_krx_universe() -> list[dict[str, str]]:
+    if not KRX_AVAILABLE:
+        return []
+
+    records: list[dict[str, str]] = []
+    market_specs = [
+        ("KOSPI", ".KS"),
+        ("KOSDAQ", ".KQ"),
+        ("KONEX", ".KQ"),
+    ]
+    for market_name, suffix in market_specs:
+        try:
+            tickers = krx_stock.get_market_ticker_list(market=market_name)
+        except Exception:
+            tickers = []
+        for ticker in tickers:
+            try:
+                name = krx_stock.get_market_ticker_name(ticker)
+            except Exception:
+                continue
+            if not name:
+                continue
+            records.append(
+                {
+                    "name": str(name).strip(),
+                    "symbol": f"{ticker}{suffix}",
+                    "exchange": market_name,
+                    "currency": "KRW",
+                    "price": "-",
+                }
+            )
+    return records
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def search_candidates(query: str, market: str) -> list[dict[str, str]]:
     keyword = query.strip()
     if not keyword:
         return []
+
+    if market == "KR":
+        krx_rows = get_krx_universe()
+        if krx_rows:
+            key = keyword.replace(" ", "").lower()
+            matched = []
+            for row in krx_rows:
+                row_key = row["name"].replace(" ", "").lower()
+                symbol_key = row["symbol"].replace(".", "").lower()
+                if key in row_key or key in symbol_key:
+                    matched.append(row)
+            # Exact match first for better UX.
+            matched.sort(key=lambda x: (x["name"].replace(" ", "").lower() != key, x["name"]))
+            return matched[:20]
 
     results: list[dict[str, str]] = []
     try:
@@ -100,6 +156,17 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, 
     if market == "KR" and "." not in symbol and symbol.isdigit() and len(symbol) == 6:
         suffix = ".KS" if kr_exchange == "KOSPI" else ".KQ"
         return f"{symbol}{suffix}", "kr_code"
+
+    if market == "KR":
+        key = query.replace(" ", "").lower()
+        for row in get_krx_universe():
+            row_key = row["name"].replace(" ", "").lower()
+            if row_key == key:
+                return row["symbol"], "krx_exact"
+        for row in get_krx_universe():
+            row_key = row["name"].replace(" ", "").lower()
+            if key and key in row_key:
+                return row["symbol"], "krx_partial"
 
     # Obvious ticker formats: use directly.
     if "." in symbol or (symbol.isalnum() and len(symbol) <= 6 and symbol == symbol.upper()):
