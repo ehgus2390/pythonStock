@@ -290,6 +290,97 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def period_to_days(period: str) -> int:
+    mapping = {
+        "1mo": 35,
+        "3mo": 100,
+        "6mo": 200,
+        "1y": 380,
+        "2y": 760,
+        "5y": 1900,
+    }
+    return mapping.get(period, 380)
+
+
+def yfinance_download_safe(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    try:
+        df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False)
+    except Exception:
+        return pd.DataFrame()
+    df = normalize_columns(df)
+    if df.empty:
+        return df
+    needed = {"Open", "High", "Low", "Close"}
+    if not needed.issubset(set(df.columns)):
+        return pd.DataFrame()
+    return df
+
+
+def fetch_krx_ohlcv_pykrx(symbol: str, period: str) -> pd.DataFrame:
+    if not KRX_AVAILABLE:
+        return pd.DataFrame()
+    ticker = symbol.split(".")[0]
+    if (not ticker.isdigit()) or len(ticker) != 6:
+        return pd.DataFrame()
+
+    end_date = dt.date.today()
+    start_date = end_date - dt.timedelta(days=period_to_days(period))
+    try:
+        df = krx_stock.get_market_ohlcv_by_date(start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d"), ticker)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+    rename_map = {"시가": "Open", "고가": "High", "저가": "Low", "종가": "Close", "거래량": "Volume"}
+    df = df.rename(columns=rename_map)
+    for col in ["Open", "High", "Low", "Close"]:
+        if col not in df.columns:
+            return pd.DataFrame()
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+    df.index = pd.to_datetime(df.index)
+    return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
+def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_exchange: str) -> tuple[pd.DataFrame, str, str]:
+    tried: list[str] = []
+    candidates: list[str] = []
+
+    if market == "KR":
+        base = ticker.split(".")[0]
+        if base.isdigit() and len(base) == 6:
+            candidates.append(f"{base}.KS")
+            candidates.append(f"{base}.KQ")
+            if kr_exchange == "KOSDAQ":
+                candidates = [f"{base}.KQ", f"{base}.KS"]
+        candidates.append(ticker.upper())
+    else:
+        candidates.append(ticker.upper())
+
+    dedup_candidates = []
+    seen = set()
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            dedup_candidates.append(c)
+
+    for sym in dedup_candidates:
+        tried.append(sym)
+        df = yfinance_download_safe(sym, period, interval)
+        if not df.empty:
+            return df, f"yfinance:{sym}", sym
+
+    if market == "KR":
+        # pykrx fallback is daily data; use when Yahoo is missing/incompatible.
+        for sym in dedup_candidates:
+            df = fetch_krx_ohlcv_pykrx(sym, period)
+            if not df.empty:
+                return df, f"pykrx:{sym}(interval=1d)", sym
+
+    return pd.DataFrame(), f"failed:{','.join(tried)}", ticker
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["SMA20"] = out["Close"].rolling(20).mean()
@@ -475,18 +566,18 @@ if st.sidebar.button("분석 시작"):
         st.stop()
 
     with st.spinner("데이터를 가져오고 지표를 계산하는 중..."):
-        raw = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
-
-    raw = normalize_columns(raw)
+        raw, data_source, resolved_symbol = fetch_price_data(ticker, market, period, interval, kr_exchange)
 
     if raw.empty:
         st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
         df = add_indicators(raw)
-        st.success(f"{ticker} 분석 완료")
-        st.caption(f"입력 해석 방식: {source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.success(f"{resolved_symbol} 분석 완료")
+        st.caption(
+            f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
-        chart = build_chart(df, ticker, mobile_mode)
+        chart = build_chart(df, resolved_symbol, mobile_mode)
         if chart is not None:
             st.plotly_chart(chart, use_container_width=True)
         else:
