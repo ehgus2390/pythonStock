@@ -1,10 +1,16 @@
 ﻿import datetime as dt
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-from plotly.subplots import make_subplots
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ModuleNotFoundError:
+    go = None
+    make_subplots = None
+    PLOTLY_AVAILABLE = False
 
 
 st.set_page_config(page_title="Python Stock", layout="wide")
@@ -176,7 +182,9 @@ def run_backtest(df: pd.DataFrame) -> tuple[pd.Series, float, int, float]:
     return equity, total_return, trade_count, win_rate
 
 
-def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool) -> go.Figure:
+def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool):
+    if not PLOTLY_AVAILABLE:
+        return None
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -322,7 +330,11 @@ if st.sidebar.button("분석 시작"):
         st.caption(f"입력 해석 방식: {source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         chart = build_chart(df, ticker, mobile_mode)
-        st.plotly_chart(chart, use_container_width=True)
+        if chart is not None:
+            st.plotly_chart(chart, use_container_width=True)
+        else:
+            st.warning("현재 서버에 plotly가 없어 간단 차트로 표시합니다. requirements 재배포 후 캔들차트가 복구됩니다.")
+            st.line_chart(df[["Close", "SMA20", "SMA60"]], use_container_width=True)
 
         latest = df.iloc[-1]
         if bool(latest["BuySignal"]):
