@@ -23,6 +23,14 @@ except ModuleNotFoundError:
     make_subplots = None
     PLOTLY_AVAILABLE = False
 
+try:
+    from src.model_forecast import build_ml_forecast
+
+    ML_FORECAST_AVAILABLE = True
+except Exception:
+    build_ml_forecast = None
+    ML_FORECAST_AVAILABLE = False
+
 
 st.set_page_config(page_title="Python Stock", layout="wide")
 st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호 + 테마 + 1~3개월 예측)")
@@ -45,6 +53,11 @@ NAME_ALIASES = {
 }
 
 THEME_OPTIONS = ["없음", "로봇", "방산", "반도체", "항공/우주"]
+FORECAST_MODELS = {
+    "Baseline(추세)": "baseline",
+    "ML-Ridge": "ridge",
+    "ML-RandomForest": "rf",
+}
 
 THEME_KEYWORDS = {
     "로봇": ["로봇", "robot", "automation", "자동화"],
@@ -491,7 +504,11 @@ def run_backtest(df: pd.DataFrame) -> tuple[pd.Series, float, int, float]:
     return equity, total_return, trade_count, win_rate
 
 
-def build_forecast(df: pd.DataFrame) -> dict | None:
+def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 63) -> dict | None:
+    if ML_FORECAST_AVAILABLE and build_ml_forecast is not None:
+        return build_ml_forecast(df, model_name=model_name, horizon_days=horizon_days)
+
+    # Fallback when module import fails in some environments.
     close = df["Close"].dropna().astype(float)
     if len(close) < 40:
         return None
@@ -499,31 +516,23 @@ def build_forecast(df: pd.DataFrame) -> dict | None:
     y = close.values
     x = np.arange(len(y), dtype=float)
     w = np.linspace(0.6, 1.4, len(y))
-
     try:
         slope, intercept = np.polyfit(x, y, 1, w=w)
     except Exception:
         return None
 
-    horizon = 63
-    fx = np.arange(len(y), len(y) + horizon, dtype=float)
-    future = intercept + slope * fx
-    future = np.maximum(future, 0.01)
-
+    fx = np.arange(len(y), len(y) + horizon_days, dtype=float)
+    future = np.maximum(intercept + slope * fx, 0.01)
     last_idx = pd.Timestamp(df.index[-1])
     if last_idx.tzinfo is not None:
         last_idx = last_idx.tz_localize(None)
-    future_dates = pd.bdate_range(last_idx + pd.Timedelta(days=1), periods=horizon)
+    future_dates = pd.bdate_range(last_idx + pd.Timedelta(days=1), periods=horizon_days)
     forecast_path = pd.DataFrame({"Forecast": future}, index=future_dates)
 
     last_price = float(y[-1])
-    ret_1m = (future[20] / last_price - 1) * 100
-    ret_2m = (future[41] / last_price - 1) * 100
-    ret_3m = (future[62] / last_price - 1) * 100
-
-    returns = pd.Series(y).pct_change().dropna()
-    vol = float(returns.std()) if len(returns) > 5 else 0.01
-    confidence = min(95.0, max(5.0, abs(ret_3m) / max(vol * 100 * np.sqrt(63), 0.1) * 100))
+    ret_1m = (future[min(20, horizon_days - 1)] / last_price - 1) * 100
+    ret_2m = (future[min(41, horizon_days - 1)] / last_price - 1) * 100
+    ret_3m = (future[min(62, horizon_days - 1)] / last_price - 1) * 100
 
     if ret_3m >= 3:
         signal = "BUY"
@@ -542,7 +551,10 @@ def build_forecast(df: pd.DataFrame) -> dict | None:
         "ret_3m": ret_3m,
         "signal": signal,
         "signal_label": signal_label,
-        "confidence": confidence,
+        "confidence": 50.0,
+        "model": "baseline",
+        "mae": np.nan,
+        "direction_acc": np.nan,
     }
 
 
@@ -725,6 +737,8 @@ if candidates:
 
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
+forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
+forecast_horizon_months = st.sidebar.selectbox("예측 기간(개월)", [1, 2, 3], index=2)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
 if st.sidebar.button("분석 시작"):
@@ -743,7 +757,8 @@ if st.sidebar.button("분석 시작"):
         st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
         df = add_indicators(raw)
-        forecast = build_forecast(df)
+        forecast_model = FORECAST_MODELS[forecast_model_label]
+        forecast = build_forecast(df, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
 
         st.success(f"{resolved_symbol} 분석 완료")
         st.caption(
@@ -781,6 +796,10 @@ if st.sidebar.button("분석 시작"):
             p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
             p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
             st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
+            if pd.notna(forecast.get("mae", np.nan)):
+                m1, m2 = st.columns(2)
+                m1.metric("모델 MAE(일수익률)", f"{forecast['mae']:.3f}%")
+                m2.metric("방향 정확도", f"{forecast.get('direction_acc', np.nan):.1f}%")
 
         equity, total_return, trade_count, win_rate = run_backtest(df)
 
