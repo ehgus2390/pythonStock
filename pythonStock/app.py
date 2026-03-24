@@ -1,9 +1,11 @@
 ﻿import datetime as dt
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -260,7 +262,7 @@ def detect_theme(query: str) -> str:
     return "없음"
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+@st.cache_data(show_spinner=False, ttl=60 * 10)
 def get_krx_universe() -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     if KRX_AVAILABLE:
@@ -379,6 +381,63 @@ def get_krx_universe() -> list[dict[str, str]]:
                         "price": "-",
                     }
                 )
+
+    # 4th fallback: Naver Finance market-cap pages (cloud에서 상대적으로 안정적).
+    if not records:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://finance.naver.com/",
+        }
+
+        def _append_from_naver_market(sosok: int, exch: str, suffix: str) -> None:
+            try:
+                first_url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page=1"
+                first_resp = requests.get(first_url, headers=headers, timeout=10)
+                first_resp.raise_for_status()
+                first_resp.encoding = "euc-kr"
+                html = first_resp.text
+            except Exception:
+                return
+
+            pages = [int(x) for x in re.findall(r"page=(\d+)", html)]
+            max_page = min(max(pages) if pages else 1, 120)
+            seen_codes: set[str] = set()
+
+            for page in range(1, max_page + 1):
+                try:
+                    page_url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                    resp = requests.get(page_url, headers=headers, timeout=10)
+                    resp.raise_for_status()
+                    resp.encoding = "euc-kr"
+                    page_html = resp.text
+                except Exception:
+                    continue
+
+                matches = re.findall(r'/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', page_html)
+                for code, name in matches:
+                    code = str(code).strip()
+                    name = str(name).strip()
+                    if len(code) != 6 or (not code.isdigit()) or (not name):
+                        continue
+                    if code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    records.append(
+                        {
+                            "name": name,
+                            "symbol": f"{code}{suffix}",
+                            "exchange": exch,
+                            "currency": "KRW",
+                            "price": "-",
+                        }
+                    )
+
+        _append_from_naver_market(sosok=0, exch="KOSPI", suffix=".KS")
+        _append_from_naver_market(sosok=1, exch="KOSDAQ", suffix=".KQ")
     return dedupe_rows(records, limit=20000)
 
 
