@@ -1170,7 +1170,7 @@ if theme_choice != "없음":
     default_value = ""
 else:
     input_label = "티커 또는 회사명"
-    default_value = "AAPL" if market == "US" else "005930"
+    default_value = ""
 user_input = st.sidebar.text_input(input_label, value=default_value).strip()
 
 theme_candidates = filter_candidates_by_exchange(get_theme_candidates(theme_choice, market, limit=5000), market, exchange_choice)
