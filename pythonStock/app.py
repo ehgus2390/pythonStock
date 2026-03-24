@@ -292,15 +292,13 @@ def get_krx_universe() -> list[dict[str, str]]:
                 )
 
     if (not records) and FDR_AVAILABLE:
-        try:
-            krx_df = fdr.StockListing("KRX")
-        except Exception:
-            krx_df = pd.DataFrame()
-        if not krx_df.empty:
-            for _, row in krx_df.iterrows():
+        def _append_fdr_listing(df: pd.DataFrame, fallback_exch: str) -> None:
+            if df is None or df.empty:
+                return
+            for _, row in df.iterrows():
                 code = str(row.get("Code", "")).zfill(6)
                 name = str(row.get("Name", "")).strip()
-                market_name = str(row.get("Market", "")).upper()
+                market_name = str(row.get("Market", fallback_exch)).upper()
                 if len(code) != 6 or not name:
                     continue
                 if "KOSDAQ" in market_name:
@@ -321,7 +319,67 @@ def get_krx_universe() -> list[dict[str, str]]:
                         "price": "-",
                     }
                 )
-    return records
+
+        # Try broad KRX listing first.
+        try:
+            _append_fdr_listing(fdr.StockListing("KRX"), "KOSPI")
+        except Exception:
+            pass
+
+        # Retry by each market to increase resilience when KRX endpoint is flaky.
+        if not records:
+            for m in ["KOSPI", "KOSDAQ", "KONEX"]:
+                try:
+                    _append_fdr_listing(fdr.StockListing(m), m)
+                except Exception:
+                    continue
+
+    # 3rd fallback: KRX KIND downloadable corp list (works without pykrx/FDR).
+    if not records:
+        market_params = [
+            ("stockMkt", "KOSPI", ".KS"),
+            ("kosdaqMkt", "KOSDAQ", ".KQ"),
+            ("konexMkt", "KONEX", ".KQ"),
+        ]
+        for market_type, exch, suffix in market_params:
+            try:
+                url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType={market_type}"
+                # KRX endpoint is often served as html table; read_html handles it well.
+                table = pd.read_html(url, header=0)[0]
+            except Exception:
+                continue
+
+            if table is None or table.empty:
+                continue
+
+            # Normalize expected Korean column names.
+            col_name = None
+            col_code = None
+            for c in table.columns:
+                cs = str(c).strip()
+                if cs in ["회사명", "기업명"]:
+                    col_name = c
+                if cs in ["종목코드", "종목 코드", "코드"]:
+                    col_code = c
+            if col_name is None or col_code is None:
+                continue
+
+            for _, row in table.iterrows():
+                name = str(row.get(col_name, "")).strip()
+                code = str(row.get(col_code, "")).strip()
+                code = code.zfill(6)
+                if not name or len(code) != 6 or (not code.isdigit()):
+                    continue
+                records.append(
+                    {
+                        "name": name,
+                        "symbol": f"{code}{suffix}",
+                        "exchange": exch,
+                        "currency": "KRW",
+                        "price": "-",
+                    }
+                )
+    return dedupe_rows(records, limit=20000)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
