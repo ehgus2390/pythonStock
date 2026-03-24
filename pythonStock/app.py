@@ -1245,10 +1245,30 @@ if candidate_symbol:
         st.rerun()
 
 show_kosdaq_list = False
-if market == "KR" and exchange_choice == "KOSDAQ":
+kosdaq_selected_symbol = ""
+if market == "KR":
     kosdaq_rows = [r for r in get_krx_universe() if r.get("exchange") == "KOSDAQ"]
     st.sidebar.caption(f"KOSDAQ 상장사 {len(kosdaq_rows)}개")
-    show_kosdaq_list = st.sidebar.toggle("KOSDAQ 전체 목록 보기", value=False)
+    show_kosdaq_list = st.sidebar.toggle("KOSDAQ 전체 목록 표 보기", value=False)
+    if kosdaq_rows:
+        st.sidebar.markdown("**KOSDAQ 상장사 선택**")
+        kosdaq_filter = st.sidebar.text_input("KOSDAQ 회사명 필터", value="", key="kosdaq_filter").strip()
+        k_key = kosdaq_filter.replace(" ", "").lower()
+        kosdaq_rows = sorted(kosdaq_rows, key=lambda r: (str(r.get("name", "")).lower(), str(r.get("symbol", ""))))
+        if k_key:
+            k_rows = [
+                r
+                for r in kosdaq_rows
+                if (k_key in r["name"].replace(" ", "").lower()) or (k_key in r["symbol"].replace(".", "").lower())
+            ]
+        else:
+            k_rows = kosdaq_rows
+        st.sidebar.caption(f"필터 결과 {len(k_rows)}개")
+        options = ["선택 안함"] + [f"{r['name']} | {r['symbol']}" for r in k_rows]
+        picked = st.sidebar.selectbox("KOSDAQ 회사", options, index=0, key="kosdaq_company_select")
+        if picked != "선택 안함":
+            kosdaq_selected_symbol = picked.split("|")[1].strip()
+            st.sidebar.caption(f"KOSDAQ 선택 티커: {kosdaq_selected_symbol} (선택 즉시 조회)")
 
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
@@ -1256,7 +1276,7 @@ forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODEL
 forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", [3, 6, 12], index=2)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
-run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol)
+run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol) or bool(kosdaq_selected_symbol)
 
 if show_kosdaq_list:
     with st.expander("KOSDAQ 상장사 전체 목록", expanded=False):
@@ -1271,7 +1291,9 @@ if show_kosdaq_list:
             st.dataframe(kdf, use_container_width=True, height=420)
 
 if run_requested:
-    if quick_symbol:
+    if kosdaq_selected_symbol:
+        ticker, source = kosdaq_selected_symbol, "kosdaq_list"
+    elif quick_symbol:
         ticker, source = quick_symbol, "quick_menu"
     elif index_selected_symbol:
         ticker, source = index_selected_symbol, "index_menu"
