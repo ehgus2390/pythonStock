@@ -1264,7 +1264,12 @@ if market == "KR":
         else:
             k_rows = kosdaq_rows
         st.sidebar.caption(f"필터 결과 {len(k_rows)}개")
-        options = ["선택 안함"] + [f"{r['name']} | {r['symbol']}" for r in k_rows]
+        if (not k_key) and len(k_rows) > 400:
+            st.sidebar.caption("회사명 필터를 입력하면 정확히 찾을 수 있습니다. (초기 400개만 표시)")
+            visible_rows = k_rows[:400]
+        else:
+            visible_rows = k_rows
+        options = ["선택 안함"] + [f"{r['name']} | {r['symbol']}" for r in visible_rows]
         picked = st.sidebar.selectbox("KOSDAQ 회사", options, index=0, key="kosdaq_company_select")
         if picked != "선택 안함":
             kosdaq_selected_symbol = picked.split("|")[1].strip()
