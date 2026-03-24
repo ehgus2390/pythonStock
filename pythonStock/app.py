@@ -274,14 +274,17 @@ def detect_theme(query: str) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 10)
-def get_krx_universe() -> list[dict[str, str]]:
+def get_krx_universe(exchange_filter: str = "전체") -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
+    target_exchange = exchange_filter if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"} else "전체"
     if KRX_AVAILABLE:
         market_specs = [
             ("KOSPI", ".KS"),
             ("KOSDAQ", ".KQ"),
             ("KONEX", ".KQ"),
         ]
+        if target_exchange != "전체":
+            market_specs = [x for x in market_specs if x[0] == target_exchange]
         for market_name, suffix in market_specs:
             try:
                 tickers = krx_stock.get_market_ticker_list(market=market_name)
@@ -333,19 +336,25 @@ def get_krx_universe() -> list[dict[str, str]]:
                     }
                 )
 
-        # Try broad KRX listing first.
-        try:
-            _append_fdr_listing(fdr.StockListing("KRX"), "KOSPI")
-        except Exception:
-            pass
+        if target_exchange == "전체":
+            # Try broad KRX listing first.
+            try:
+                _append_fdr_listing(fdr.StockListing("KRX"), "KOSPI")
+            except Exception:
+                pass
 
-        # Retry by each market to increase resilience when KRX endpoint is flaky.
-        if not records:
-            for m in ["KOSPI", "KOSDAQ", "KONEX"]:
-                try:
-                    _append_fdr_listing(fdr.StockListing(m), m)
-                except Exception:
-                    continue
+            # Retry by each market to increase resilience when KRX endpoint is flaky.
+            if not records:
+                for m in ["KOSPI", "KOSDAQ", "KONEX"]:
+                    try:
+                        _append_fdr_listing(fdr.StockListing(m), m)
+                    except Exception:
+                        continue
+        else:
+            try:
+                _append_fdr_listing(fdr.StockListing(target_exchange), target_exchange)
+            except Exception:
+                pass
 
     # 3rd fallback: KRX KIND downloadable corp list (works without pykrx/FDR).
     if not records:
@@ -354,6 +363,8 @@ def get_krx_universe() -> list[dict[str, str]]:
             ("kosdaqMkt", "KOSDAQ", ".KQ"),
             ("konexMkt", "KONEX", ".KQ"),
         ]
+        if target_exchange != "전체":
+            market_params = [x for x in market_params if x[1] == target_exchange]
         for market_type, exch, suffix in market_params:
             try:
                 url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType={market_type}"
@@ -447,8 +458,10 @@ def get_krx_universe() -> list[dict[str, str]]:
                         }
                     )
 
-        _append_from_naver_market(sosok=0, exch="KOSPI", suffix=".KS")
-        _append_from_naver_market(sosok=1, exch="KOSDAQ", suffix=".KQ")
+        if target_exchange in {"전체", "KOSPI"}:
+            _append_from_naver_market(sosok=0, exch="KOSPI", suffix=".KS")
+        if target_exchange in {"전체", "KOSDAQ"}:
+            _append_from_naver_market(sosok=1, exch="KOSDAQ", suffix=".KQ")
     return dedupe_rows(records, limit=20000)
 
 
@@ -598,12 +611,12 @@ def get_krx_index_constituents(index_key: str) -> list[dict[str, str]]:
     return dedupe_rows(out, limit=2000)
 
 
-def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dict[str, str]]:
+def get_theme_candidates(theme: str, market: str, exchange_choice: str = "전체", limit: int = 5000) -> list[dict[str, str]]:
     if theme == "없음":
         return []
 
     if market == "KR":
-        rows = get_krx_universe()
+        rows = get_krx_universe(exchange_choice)
         seeds = set(THEME_KR_SEEDS.get(theme, []))
         keys = [k.lower() for k in THEME_KEYWORDS.get(theme, [])]
         matched = []
@@ -623,12 +636,12 @@ def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dic
         # Use seed names + keyword search through Yahoo lookup.
         fallback_rows: list[dict[str, str]] = []
         for seed_name in THEME_KR_SEEDS.get(theme, []):
-            seed_matches = search_candidates(seed_name, "KR", max_results=50)
+            seed_matches = search_candidates(seed_name, "KR", exchange_choice=exchange_choice, max_results=50)
             fallback_rows.extend(seed_matches)
 
         for k in keys:
             if len(k) >= 2 and not k.isascii():
-                key_matches = search_candidates(k, "KR", max_results=50)
+                key_matches = search_candidates(k, "KR", exchange_choice=exchange_choice, max_results=50)
                 fallback_rows.extend(key_matches)
 
         return dedupe_rows(fallback_rows, limit=limit)
@@ -646,7 +659,7 @@ def get_theme_candidates(theme: str, market: str, limit: int = 5000) -> list[dic
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def search_candidates(query: str, market: str, max_results: int = 5000) -> list[dict[str, str]]:
+def search_candidates(query: str, market: str, exchange_choice: str = "전체", max_results: int = 5000) -> list[dict[str, str]]:
     keyword = query.strip()
     if not keyword:
         return []
@@ -654,7 +667,7 @@ def search_candidates(query: str, market: str, max_results: int = 5000) -> list[
     key = keyword.replace(" ", "").lower()
 
     if market == "KR":
-        krx_rows = get_krx_universe()
+        krx_rows = get_krx_universe(exchange_choice)
         if krx_rows:
             matched = []
             for row in krx_rows:
@@ -733,11 +746,12 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, 
     key = query.replace(" ", "").lower()
 
     if market == "KR":
-        for row in get_krx_universe():
+        kr_rows = get_krx_universe("전체")
+        for row in kr_rows:
             row_key = row["name"].replace(" ", "").lower()
             if row_key == key:
                 return row["symbol"], "krx_exact"
-        for row in get_krx_universe():
+        for row in kr_rows:
             row_key = row["name"].replace(" ", "").lower()
             if key and key in row_key:
                 return row["symbol"], "krx_partial"
@@ -1173,9 +1187,13 @@ else:
     default_value = ""
 user_input = st.sidebar.text_input(input_label, value=default_value).strip()
 
-theme_candidates = filter_candidates_by_exchange(get_theme_candidates(theme_choice, market, limit=5000), market, exchange_choice)
+theme_candidates = filter_candidates_by_exchange(
+    get_theme_candidates(theme_choice, market, exchange_choice=exchange_choice, limit=5000),
+    market,
+    exchange_choice,
+)
 search_base_candidates = filter_candidates_by_exchange(
-    search_candidates(user_input, market, max_results=5000) if len(user_input) >= 1 else [],
+    search_candidates(user_input, market, exchange_choice=exchange_choice, max_results=5000) if len(user_input) >= 1 else [],
     market,
     exchange_choice,
 )
@@ -1202,9 +1220,16 @@ else:
     if key:
         candidates_all = dedupe_rows(search_base_candidates, limit=5000)
     else:
-        universe = get_krx_universe() if market == "KR" else get_us_universe()
-        universe = filter_candidates_by_exchange(universe, market, exchange_choice)
-        candidates_all = dedupe_rows(universe, limit=5000)
+        if market == "KR":
+            # KR 전체는 초기 로딩이 무거워서 검색어 입력 전에는 목록 로딩을 생략한다.
+            if exchange_choice == "전체":
+                candidates_all = []
+            else:
+                candidates_all = dedupe_rows(get_krx_universe(exchange_choice), limit=5000)
+        else:
+            universe = get_us_universe()
+            universe = filter_candidates_by_exchange(universe, market, exchange_choice)
+            candidates_all = dedupe_rows(universe, limit=5000)
 
 if index_basket_rows:
     idx_filtered = []
@@ -1256,6 +1281,8 @@ if index_basket_rows:
 
 selected_symbol = ""
 if theme_choice == "없음":
+    if market == "KR" and exchange_choice == "전체" and not key:
+        st.sidebar.caption("KR 전체는 회사명/종목코드 1글자 이상 입력 시 후보를 불러옵니다.")
     st.sidebar.caption(f"검색 후보 총 {len(candidates_all)}개")
     page_size = st.sidebar.selectbox("후보 표시 수", [20, 50, 100, 200], index=2)
     total_pages = max(1, int(np.ceil(len(candidates_all) / page_size))) if candidates_all else 1
@@ -1317,7 +1344,7 @@ if candidate_symbol:
 show_kosdaq_list = False
 kosdaq_selected_symbol = ""
 if market == "KR":
-    kosdaq_rows = [r for r in get_krx_universe() if r.get("exchange") == "KOSDAQ"]
+    kosdaq_rows = get_krx_universe("KOSDAQ")
     st.sidebar.caption(f"KOSDAQ 상장사 {len(kosdaq_rows)}개")
     show_kosdaq_list = st.sidebar.toggle("KOSDAQ 전체 목록 표 보기", value=False)
     if kosdaq_rows:
