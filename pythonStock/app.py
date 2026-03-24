@@ -207,6 +207,17 @@ def convert_to_krw(price: float, currency: str, usdkrw: float | None) -> float |
     return None
 
 
+def get_company_name_by_symbol(symbol: str, market: str) -> str:
+    sym = str(symbol).strip().upper()
+    if not sym:
+        return ""
+    rows = get_krx_universe() if market == "KR" else get_us_universe()
+    for row in rows:
+        if str(row.get("symbol", "")).strip().upper() == sym:
+            return str(row.get("name", "")).strip()
+    return ""
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def get_usdkrw_rate() -> float | None:
     try:
@@ -1381,7 +1392,11 @@ if run_requested:
         forecast_model = FORECAST_MODELS[forecast_model_label]
         forecast = build_forecast(df, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
 
-        st.success(f"{resolved_symbol} 분석 완료")
+        company_name = get_company_name_by_symbol(resolved_symbol, market)
+        if company_name:
+            st.success(f"{company_name} ({resolved_symbol}) 분석 완료")
+        else:
+            st.success(f"{resolved_symbol} 분석 완료")
         st.caption(
             f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
