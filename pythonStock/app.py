@@ -162,6 +162,7 @@ THEME_US_SEEDS = {
 
 APP_STATE_PATH = Path(__file__).resolve().parent / "user_state.json"
 KRX_CACHE_PATH = Path(__file__).resolve().parent / "krx_universe_cache.json"
+KRX_SNAPSHOT_PATH = Path(__file__).resolve().parent / "krx_universe_snapshot.csv"
 KRX_CACHE_TTL_SEC = 60 * 60 * 24
 
 
@@ -228,6 +229,38 @@ def _save_cached_krx_rows(exchange_filter: str, rows: list[dict[str, str]]) -> N
     try:
         with KRX_CACHE_PATH.open("w", encoding="utf-8") as f:
             json.dump(store, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _load_krx_snapshot_rows(exchange_filter: str) -> list[dict[str, str]]:
+    if not KRX_SNAPSHOT_PATH.exists():
+        return []
+    try:
+        df = pd.read_csv(KRX_SNAPSHOT_PATH, dtype=str)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    for col in ["name", "symbol", "exchange", "currency", "price"]:
+        if col not in df.columns:
+            df[col] = ""
+    if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"}:
+        df = df[df["exchange"] == exchange_filter]
+    rows = df[["name", "symbol", "exchange", "currency", "price"]].fillna("").to_dict("records")
+    return dedupe_rows(rows, limit=20000)
+
+
+def _save_krx_snapshot_rows(rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    try:
+        df = pd.DataFrame(rows)
+        for col in ["name", "symbol", "exchange", "currency", "price"]:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[["name", "symbol", "exchange", "currency", "price"]]
+        df.to_csv(KRX_SNAPSHOT_PATH, index=False, encoding="utf-8-sig")
     except Exception:
         pass
 
@@ -363,6 +396,10 @@ def detect_theme(query: str) -> str:
 def get_krx_universe(exchange_filter: str = "전체") -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     target_exchange = exchange_filter if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"} else "전체"
+
+    snapshot_rows = _load_krx_snapshot_rows(target_exchange)
+    if snapshot_rows:
+        return dedupe_rows(snapshot_rows, limit=20000)
 
     cached_rows = _get_cached_krx_rows(target_exchange)
     if cached_rows:
@@ -555,6 +592,8 @@ def get_krx_universe(exchange_filter: str = "전체") -> list[dict[str, str]]:
     out = dedupe_rows(records, limit=20000)
     if out:
         _save_cached_krx_rows(target_exchange, out)
+        if target_exchange == "전체":
+            _save_krx_snapshot_rows(out)
     return out
 
 
