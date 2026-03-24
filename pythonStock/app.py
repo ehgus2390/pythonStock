@@ -1,6 +1,7 @@
 ﻿import datetime as dt
 import json
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -53,7 +54,7 @@ except Exception:
 
 
 st.set_page_config(page_title="Python Stock", layout="wide")
-st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호 + 테마 + 1~3개월 예측)")
+st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호 + 테마 + 1~12개월 예측)")
 
 
 NAME_ALIASES = {
@@ -160,6 +161,75 @@ THEME_US_SEEDS = {
 
 
 APP_STATE_PATH = Path(__file__).resolve().parent / "user_state.json"
+KRX_CACHE_PATH = Path(__file__).resolve().parent / "krx_universe_cache.json"
+KRX_CACHE_TTL_SEC = 60 * 60 * 24
+
+
+def _load_krx_cache_store() -> dict:
+    if not KRX_CACHE_PATH.exists():
+        return {}
+    try:
+        with KRX_CACHE_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _get_cached_krx_rows(exchange_filter: str) -> list[dict[str, str]] | None:
+    store = _load_krx_cache_store()
+    by_exchange = store.get("by_exchange", {})
+    now = int(time.time())
+
+    def _is_fresh(ts: int) -> bool:
+        return (now - int(ts)) <= KRX_CACHE_TTL_SEC
+
+    if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"}:
+        node = by_exchange.get(exchange_filter, {})
+        ts = int(node.get("ts", 0) or 0)
+        rows = node.get("rows", [])
+        if ts and _is_fresh(ts) and isinstance(rows, list) and rows:
+            return rows
+        return None
+
+    merged: list[dict[str, str]] = []
+    ok_count = 0
+    for exch in ["KOSPI", "KOSDAQ", "KONEX"]:
+        node = by_exchange.get(exch, {})
+        ts = int(node.get("ts", 0) or 0)
+        rows = node.get("rows", [])
+        if ts and _is_fresh(ts) and isinstance(rows, list) and rows:
+            merged.extend(rows)
+            ok_count += 1
+    if ok_count >= 2 and merged:
+        return merged
+    return None
+
+
+def _save_cached_krx_rows(exchange_filter: str, rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    now = int(time.time())
+    store = _load_krx_cache_store()
+    by_exchange = store.get("by_exchange", {})
+
+    if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"}:
+        by_exchange[exchange_filter] = {"ts": now, "rows": rows}
+    else:
+        groups = {"KOSPI": [], "KOSDAQ": [], "KONEX": []}
+        for row in rows:
+            exch = str(row.get("exchange", ""))
+            if exch in groups:
+                groups[exch].append(row)
+        for exch, grp_rows in groups.items():
+            if grp_rows:
+                by_exchange[exch] = {"ts": now, "rows": grp_rows}
+
+    store["by_exchange"] = by_exchange
+    try:
+        with KRX_CACHE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def load_user_state() -> dict:
@@ -211,7 +281,23 @@ def get_company_name_by_symbol(symbol: str, market: str) -> str:
     sym = str(symbol).strip().upper()
     if not sym:
         return ""
-    rows = get_krx_universe() if market == "KR" else get_us_universe()
+    if market == "KR":
+        code = sym.split(".")[0]
+        if KRX_AVAILABLE and len(code) == 6 and code.isdigit():
+            try:
+                name = krx_stock.get_market_ticker_name(code)
+                if name:
+                    return str(name).strip()
+            except Exception:
+                pass
+        suffix = ".KQ" if sym.endswith(".KQ") else (".KS" if sym.endswith(".KS") else "")
+        if suffix:
+            rows = get_krx_universe("KOSDAQ" if suffix == ".KQ" else "KOSPI")
+            for row in rows:
+                if str(row.get("symbol", "")).strip().upper() == sym:
+                    return str(row.get("name", "")).strip()
+        return ""
+    rows = get_us_universe()
     for row in rows:
         if str(row.get("symbol", "")).strip().upper() == sym:
             return str(row.get("name", "")).strip()
@@ -277,6 +363,10 @@ def detect_theme(query: str) -> str:
 def get_krx_universe(exchange_filter: str = "전체") -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     target_exchange = exchange_filter if exchange_filter in {"KOSPI", "KOSDAQ", "KONEX"} else "전체"
+
+    cached_rows = _get_cached_krx_rows(target_exchange)
+    if cached_rows:
+        return dedupe_rows(cached_rows, limit=20000)
     if KRX_AVAILABLE:
         market_specs = [
             ("KOSPI", ".KS"),
@@ -462,7 +552,10 @@ def get_krx_universe(exchange_filter: str = "전체") -> list[dict[str, str]]:
             _append_from_naver_market(sosok=0, exch="KOSPI", suffix=".KS")
         if target_exchange in {"전체", "KOSDAQ"}:
             _append_from_naver_market(sosok=1, exch="KOSDAQ", suffix=".KQ")
-    return dedupe_rows(records, limit=20000)
+    out = dedupe_rows(records, limit=20000)
+    if out:
+        _save_cached_krx_rows(target_exchange, out)
+    return out
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -728,7 +821,7 @@ def search_candidates(query: str, market: str, exchange_choice: str = "전체", 
     return dedupe_rows(results, limit=max_results)
 
 
-def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, str]:
+def resolve_ticker(raw_input: str, market: str, kr_exchange: str, exchange_choice: str = "전체") -> tuple[str, str]:
     query = raw_input.strip()
     if not query:
         return "", "empty"
@@ -746,7 +839,8 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str) -> tuple[str, 
     key = query.replace(" ", "").lower()
 
     if market == "KR":
-        kr_rows = get_krx_universe("전체")
+        scope_exchange = exchange_choice if exchange_choice in {"KOSPI", "KOSDAQ", "KONEX"} else "전체"
+        kr_rows = get_krx_universe(scope_exchange)
         for row in kr_rows:
             row_key = row["name"].replace(" ", "").lower()
             if row_key == key:
@@ -1104,6 +1198,8 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
     if forecast is not None:
         fdf = forecast["path"]
+        horizon_days = len(fdf)
+        horizon_months = max(1, int(round(horizon_days / 21)))
         up = forecast["signal"] == "BUY"
         down = forecast["signal"] == "SELL"
         fc_color = "#9ec5fe" if up else ("#ffc9c9" if down else "#ced4da")
@@ -1114,12 +1210,36 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                 x=fdf.index,
                 y=fdf["Forecast"],
                 mode="lines",
-                name="1~3개월 예측",
+                name=f"예측 경로({horizon_months}개월)",
                 line=dict(color=fc_color, width=3, dash="dot"),
             ),
             row=1,
             col=1,
         )
+
+        horizon_points = [("1M", 20), ("2M", 41), ("3M", 62), ("6M", 125), ("12M", 251)]
+        hx = []
+        hy = []
+        htext = []
+        for label, idx in horizon_points:
+            if idx < horizon_days:
+                hx.append(fdf.index[idx])
+                hy.append(float(fdf["Forecast"].iloc[idx]))
+                htext.append(label)
+        if hx:
+            fig.add_trace(
+                go.Scatter(
+                    x=hx,
+                    y=hy,
+                    mode="markers+text",
+                    name="예측 구간",
+                    marker=dict(symbol="circle", size=7, color=fc_color, line=dict(width=1, color="#495057")),
+                    text=htext,
+                    textposition="top center",
+                ),
+                row=1,
+                col=1,
+            )
 
         fig.add_trace(
             go.Scatter(
@@ -1134,6 +1254,8 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             row=1,
             col=1,
         )
+        fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=1, col=1)
+        fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=2, col=1)
 
     fig.add_trace(
         go.Scatter(
@@ -1193,7 +1315,9 @@ theme_candidates = filter_candidates_by_exchange(
     exchange_choice,
 )
 search_base_candidates = filter_candidates_by_exchange(
-    search_candidates(user_input, market, exchange_choice=exchange_choice, max_results=5000) if len(user_input) >= 1 else [],
+    search_candidates(user_input, market, exchange_choice=exchange_choice, max_results=5000)
+    if len(user_input) >= (2 if (market == "KR" and exchange_choice == "전체") else 1)
+    else [],
     market,
     exchange_choice,
 )
@@ -1282,7 +1406,7 @@ if index_basket_rows:
 selected_symbol = ""
 if theme_choice == "없음":
     if market == "KR" and exchange_choice == "전체" and not key:
-        st.sidebar.caption("KR 전체는 회사명/종목코드 1글자 이상 입력 시 후보를 불러옵니다.")
+        st.sidebar.caption("KR 전체는 회사명/종목코드 2글자 이상 입력 시 후보를 불러옵니다.")
     st.sidebar.caption(f"검색 후보 총 {len(candidates_all)}개")
     page_size = st.sidebar.selectbox("후보 표시 수", [20, 50, 100, 200], index=2)
     total_pages = max(1, int(np.ceil(len(candidates_all) / page_size))) if candidates_all else 1
@@ -1324,7 +1448,7 @@ else:
 
 candidate_symbol = index_selected_symbol or theme_selected_symbol or selected_symbol
 if (not candidate_symbol) and user_input:
-    r_ticker, _ = resolve_ticker(user_input, market, kr_exchange)
+    r_ticker, _ = resolve_ticker(user_input, market, kr_exchange, exchange_choice)
     candidate_symbol = r_ticker
 
 if candidate_symbol:
@@ -1343,11 +1467,14 @@ if candidate_symbol:
 
 show_kosdaq_list = False
 kosdaq_selected_symbol = ""
+kosdaq_rows: list[dict[str, str]] = []
 if market == "KR":
-    kosdaq_rows = get_krx_universe("KOSDAQ")
-    st.sidebar.caption(f"KOSDAQ 상장사 {len(kosdaq_rows)}개")
+    use_kosdaq_picker = st.sidebar.toggle("KOSDAQ 빠른 선택 사용", value=False)
     show_kosdaq_list = st.sidebar.toggle("KOSDAQ 전체 목록 표 보기", value=False)
-    if kosdaq_rows:
+    if use_kosdaq_picker or show_kosdaq_list:
+        kosdaq_rows = get_krx_universe("KOSDAQ")
+    if use_kosdaq_picker and kosdaq_rows:
+        st.sidebar.caption(f"KOSDAQ 상장사 {len(kosdaq_rows)}개")
         st.sidebar.markdown("**KOSDAQ 상장사 선택**")
         kosdaq_filter = st.sidebar.text_input("KOSDAQ 회사명 필터", value="", key="kosdaq_filter").strip()
         k_key = kosdaq_filter.replace(" ", "").lower()
@@ -1371,6 +1498,8 @@ if market == "KR":
         if picked != "선택 안함":
             kosdaq_selected_symbol = picked.split("|")[1].strip()
             st.sidebar.caption(f"KOSDAQ 선택 티커: {kosdaq_selected_symbol} (선택 즉시 조회)")
+    elif use_kosdaq_picker:
+        st.sidebar.caption("KOSDAQ 상장사 데이터를 불러오지 못했습니다.")
 
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
@@ -1404,7 +1533,7 @@ if run_requested:
     elif selected_symbol:
         ticker, source = selected_symbol, "autocomplete"
     else:
-        ticker, source = resolve_ticker(user_input, market, kr_exchange)
+        ticker, source = resolve_ticker(user_input, market, kr_exchange, exchange_choice)
     if not ticker:
         st.error("티커 또는 회사명을 입력하세요.")
         st.stop()
