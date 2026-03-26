@@ -1052,8 +1052,15 @@ def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_ex
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    if "Volume" not in out.columns:
+        out["Volume"] = 0
     out["SMA20"] = out["Close"].rolling(20).mean()
     out["SMA60"] = out["Close"].rolling(60).mean()
+    out["VOL_SMA20"] = out["Volume"].rolling(20).mean()
+    std20 = out["Close"].rolling(20).std()
+    out["BB_UPPER"] = out["SMA20"] + (2 * std20)
+    out["BB_LOWER"] = out["SMA20"] - (2 * std20)
+    out["BB_WIDTH"] = (out["BB_UPPER"] - out["BB_LOWER"]) / out["SMA20"].replace(0, np.nan)
 
     delta = out["Close"].diff()
     gain = delta.clip(lower=0)
@@ -1097,6 +1104,169 @@ def run_backtest(df: pd.DataFrame) -> tuple[pd.Series, float, int, float]:
     trade_count = len(trade_returns)
     win_rate = (sum(1 for r in trade_returns if r > 0) / trade_count * 100) if trade_count else 0.0
     return equity, total_return, trade_count, win_rate
+
+
+def get_benchmark_symbol(market: str, exchange_choice: str) -> str:
+    if market == "KR":
+        if exchange_choice == "KOSDAQ":
+            return "^KQ11"
+        return "^KS11"
+    return "^GSPC"
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def get_benchmark_close_series(market: str, exchange_choice: str, period: str = "2y") -> pd.Series:
+    symbol = get_benchmark_symbol(market, exchange_choice)
+    df = yfinance_download_safe(symbol, period=period, interval="1d")
+    if df.empty or "Close" not in df.columns:
+        return pd.Series(dtype=float)
+    out = df["Close"].astype(float).dropna()
+    out.index = pd.to_datetime(out.index)
+    return out
+
+
+def enrich_forecast(df: pd.DataFrame, forecast: dict | None) -> dict | None:
+    if forecast is None:
+        return None
+    if "path" not in forecast or forecast["path"] is None or forecast["path"].empty:
+        return forecast
+
+    fdf = forecast["path"].copy()
+    base = fdf["Forecast"].astype(float).values
+    if len(base) == 0:
+        return forecast
+
+    close_ret = df["Close"].astype(float).pct_change().dropna()
+    vol = float(close_ret.std()) if len(close_ret) > 20 else 0.015
+    vol = float(np.clip(vol, 0.005, 0.06))
+
+    t = np.arange(1, len(base) + 1, dtype=float)
+    band = np.clip(vol * np.sqrt(t) * 1.15, 0.0, 0.90)
+    bull = np.maximum(base * np.exp(band), 0.01)
+    bear = np.maximum(base * np.exp(-band), 0.01)
+
+    fdf["Bull"] = bull
+    fdf["Bear"] = bear
+    forecast["path"] = fdf
+
+    last_price = float(df["Close"].iloc[-1])
+    forecast["ret_12m_bull"] = (bull[-1] / last_price - 1) * 100
+    forecast["ret_12m_bear"] = (bear[-1] / last_price - 1) * 100
+
+    h = len(base)
+    front = max(10, min(63, h // 3 if h >= 3 else h))
+    if front >= h:
+        front = max(1, h - 1)
+
+    if float(forecast.get("ret_12m", 0.0)) >= 0:
+        buy_idx = int(np.argmin(base[:front]))
+        sell_idx = buy_idx + int(np.argmax(base[buy_idx:]))
+    else:
+        sell_idx = int(np.argmax(base[:front]))
+        buy_idx = sell_idx + int(np.argmin(base[sell_idx:]))
+
+    buy_idx = int(np.clip(buy_idx, 0, h - 1))
+    sell_idx = int(np.clip(sell_idx, 0, h - 1))
+    if buy_idx == sell_idx and h >= 2:
+        sell_idx = min(h - 1, buy_idx + 1)
+
+    forecast["entry_point"] = {"x": fdf.index[buy_idx], "y": float(fdf["Forecast"].iloc[buy_idx])}
+    forecast["exit_point"] = {"x": fdf.index[sell_idx], "y": float(fdf["Forecast"].iloc[sell_idx])}
+    return forecast
+
+
+def compute_decision_score(df: pd.DataFrame, forecast: dict | None, market: str, exchange_choice: str) -> dict:
+    latest = df.iloc[-1]
+
+    trend_score = 0.0
+    if pd.notna(latest.get("SMA20", np.nan)) and pd.notna(latest.get("SMA60", np.nan)):
+        if float(latest["SMA20"]) > float(latest["SMA60"]):
+            trend_score += 0.6
+    rsi = latest.get("RSI", np.nan)
+    if pd.notna(rsi):
+        rsi_v = float(rsi)
+        if 50 <= rsi_v <= 70:
+            trend_score += 0.4
+        elif 45 <= rsi_v < 50:
+            trend_score += 0.2
+
+    breakout_score = 0.0
+    width_series = df["BB_WIDTH"].dropna().tail(120)
+    width_q35 = float(width_series.quantile(0.35)) if len(width_series) >= 20 else np.nan
+    squeeze = pd.notna(width_q35) and pd.notna(latest.get("BB_WIDTH", np.nan)) and float(latest["BB_WIDTH"]) <= width_q35
+    vol_ok = pd.notna(latest.get("VOL_SMA20", np.nan)) and float(latest.get("VOL_SMA20", 0)) > 0 and float(latest["Volume"]) >= float(latest["VOL_SMA20"]) * 1.2
+    price_break = pd.notna(latest.get("BB_UPPER", np.nan)) and float(latest["Close"]) > float(latest["BB_UPPER"])
+    if squeeze and vol_ok and price_break:
+        breakout_score = 1.0
+    elif price_break:
+        breakout_score = 0.6
+    elif squeeze:
+        breakout_score = 0.4
+
+    rs_score = 0.5
+    benchmark = get_benchmark_close_series(market, exchange_choice, period="2y")
+    if not benchmark.empty and len(df) >= 65:
+        try:
+            stock_close = df["Close"].astype(float).dropna()
+            combined = pd.concat([stock_close.rename("stock"), benchmark.rename("bench")], axis=1).dropna()
+            if len(combined) >= 65:
+                sret = combined["stock"].iloc[-1] / combined["stock"].iloc[-61] - 1
+                bret = combined["bench"].iloc[-1] / combined["bench"].iloc[-61] - 1
+                rel = float(sret - bret)
+                if rel > 0.05:
+                    rs_score = 1.0
+                elif rel > 0.0:
+                    rs_score = 0.7
+                elif rel > -0.03:
+                    rs_score = 0.4
+                else:
+                    rs_score = 0.1
+        except Exception:
+            rs_score = 0.5
+
+    forecast_score = 0.5
+    ret12 = float(forecast.get("ret_12m", 0.0)) if forecast is not None else 0.0
+    if ret12 >= 12:
+        forecast_score = 1.0
+    elif ret12 >= 5:
+        forecast_score = 0.8
+    elif ret12 <= -12:
+        forecast_score = 0.0
+    elif ret12 <= -5:
+        forecast_score = 0.2
+
+    weights = {"trend": 0.35, "breakout": 0.20, "relative_strength": 0.20, "forecast": 0.25}
+    buy_score = (
+        trend_score * weights["trend"]
+        + breakout_score * weights["breakout"]
+        + rs_score * weights["relative_strength"]
+        + forecast_score * weights["forecast"]
+    ) * 100.0
+    buy_score = float(np.clip(buy_score, 0.0, 100.0))
+    sell_score = float(np.clip(100.0 - buy_score, 0.0, 100.0))
+
+    if buy_score >= 65:
+        decision = "BUY"
+        decision_label = "매수 우세"
+    elif buy_score <= 35:
+        decision = "SELL"
+        decision_label = "매도 우세"
+    else:
+        decision = "HOLD"
+        decision_label = "관망"
+
+    return {
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+        "decision": decision,
+        "decision_label": decision_label,
+        "component_scores": {
+            "trend_momentum": trend_score * 100.0,
+            "volatility_breakout": breakout_score * 100.0,
+            "relative_strength": rs_score * 100.0,
+            "forecast_12m": forecast_score * 100.0,
+        },
+    }
 
 
 def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
@@ -1255,6 +1425,30 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             row=1,
             col=1,
         )
+        if "Bull" in fdf.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=fdf.index,
+                    y=fdf["Bull"],
+                    mode="lines",
+                    name="낙관 시나리오",
+                    line=dict(color="#74c0fc", width=1.8, dash="dash"),
+                ),
+                row=1,
+                col=1,
+            )
+        if "Bear" in fdf.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=fdf.index,
+                    y=fdf["Bear"],
+                    mode="lines",
+                    name="비관 시나리오",
+                    line=dict(color="#ffa8a8", width=1.8, dash="dash"),
+                ),
+                row=1,
+                col=1,
+            )
 
         horizon_points = [("1M", 20), ("2M", 41), ("3M", 62), ("6M", 125), ("12M", 251)]
         hx = []
@@ -1293,6 +1487,36 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             row=1,
             col=1,
         )
+        if "entry_point" in forecast:
+            ep = forecast["entry_point"]
+            fig.add_trace(
+                go.Scatter(
+                    x=[ep["x"]],
+                    y=[ep["y"]],
+                    mode="markers+text",
+                    name="예상 매수지점",
+                    marker=dict(symbol="triangle-up", size=14, color="#2b8a3e"),
+                    text=["예상 매수지점"],
+                    textposition="bottom right",
+                ),
+                row=1,
+                col=1,
+            )
+        if "exit_point" in forecast:
+            xp = forecast["exit_point"]
+            fig.add_trace(
+                go.Scatter(
+                    x=[xp["x"]],
+                    y=[xp["y"]],
+                    mode="markers+text",
+                    name="예상 매도지점",
+                    marker=dict(symbol="triangle-down", size=14, color="#c92a2a"),
+                    text=["예상 매도지점"],
+                    textposition="top right",
+                ),
+                row=1,
+                col=1,
+            )
         fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=1, col=1)
         fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=2, col=1)
 
@@ -1544,6 +1768,7 @@ period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
 forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", [3, 6, 12], index=2)
+investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
 run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol) or bool(kosdaq_selected_symbol)
@@ -1586,6 +1811,8 @@ if run_requested:
         df = add_indicators(raw)
         forecast_model = FORECAST_MODELS[forecast_model_label]
         forecast = build_forecast(df, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
+        forecast = enrich_forecast(df, forecast)
+        decision = compute_decision_score(df, forecast, market, exchange_choice)
 
         company_name = get_company_name_by_symbol(resolved_symbol, market)
         if company_name:
@@ -1638,22 +1865,40 @@ if run_requested:
             p5.metric("예상 수익률(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
             st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
 
-            base_price = float(latest["Close"])
-            r1 = base_price * (forecast["ret_1m"] / 100.0)
-            r2 = base_price * (forecast["ret_2m"] / 100.0)
-            r3 = base_price * (forecast["ret_3m"] / 100.0)
-            r6 = base_price * (forecast.get("ret_6m", np.nan) / 100.0)
-            r12 = base_price * (forecast.get("ret_12m", np.nan) / 100.0)
+            r1 = investment_amount * (forecast["ret_1m"] / 100.0)
+            r2 = investment_amount * (forecast["ret_2m"] / 100.0)
+            r3 = investment_amount * (forecast["ret_3m"] / 100.0)
+            r6 = investment_amount * (forecast.get("ret_6m", np.nan) / 100.0)
+            r12 = investment_amount * (forecast.get("ret_12m", np.nan) / 100.0)
             a1, a2, a3, a4, a5 = st.columns(5)
-            a1.metric("예상 손익(1M)", f"{r1:,.2f}")
-            a2.metric("예상 손익(2M)", f"{r2:,.2f}")
-            a3.metric("예상 손익(3M)", f"{r3:,.2f}")
-            a4.metric("예상 손익(6M)", f"{r6:,.2f}" if pd.notna(r6) else "N/A")
-            a5.metric("예상 손익(1Y)", f"{r12:,.2f}" if pd.notna(r12) else "N/A")
+            a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+            a2.metric("예상 손익(2M)", f"{r2:,.0f}")
+            a3.metric("예상 손익(3M)", f"{r3:,.0f}")
+            a4.metric("예상 손익(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
+            a5.metric("예상 손익(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
+
+            if pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
+                s1, s2, s3 = st.columns(3)
+                s1.metric("12M 낙관 시나리오", f"{forecast['ret_12m_bull']:.2f}% / {investment_amount * (forecast['ret_12m_bull'] / 100.0):,.0f}")
+                s2.metric("12M 기준 시나리오", f"{forecast['ret_12m']:.2f}% / {investment_amount * (forecast['ret_12m'] / 100.0):,.0f}")
+                s3.metric("12M 비관 시나리오", f"{forecast['ret_12m_bear']:.2f}% / {investment_amount * (forecast['ret_12m_bear'] / 100.0):,.0f}")
             if pd.notna(forecast.get("mae", np.nan)):
                 m1, m2 = st.columns(2)
                 m1.metric("모델 MAE(일수익률)", f"{forecast['mae']:.3f}%")
                 m2.metric("방향 정확도", f"{forecast.get('direction_acc', np.nan):.1f}%")
+
+        d1, d2, d3 = st.columns(3)
+        d1.metric("통합 매수 점수", f"{decision['buy_score']:.1f}/100")
+        d2.metric("통합 매도 점수", f"{decision['sell_score']:.1f}/100")
+        d3.metric("판단", decision["decision_label"])
+        comp = decision["component_scores"]
+        st.caption(
+            "조건 점수 | "
+            f"추세+모멘텀 {comp['trend_momentum']:.0f}, "
+            f"변동성 돌파 {comp['volatility_breakout']:.0f}, "
+            f"상대강도 {comp['relative_strength']:.0f}, "
+            f"12M 예측 {comp['forecast_12m']:.0f}"
+        )
 
         equity, total_return, trade_count, win_rate = run_backtest(df)
 
