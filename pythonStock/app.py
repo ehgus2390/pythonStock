@@ -1617,14 +1617,14 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
         height=900 if mobile_mode else 980,
         legend=dict(orientation="h", y=1.02, x=0.01),
         margin=dict(l=20, r=20, t=60, b=20),
-        dragmode="pan",
+        dragmode="pan" if mobile_mode else "zoom",
         hovermode="x unified",
         uirevision="keep_pan_state",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#eef2f7")
     fig.update_yaxes(showgrid=True, gridcolor="#eef2f7")
     fig.update_xaxes(fixedrange=False)
-    fig.update_yaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=mobile_mode)
 
     window_bars = 120 if mobile_mode else 220
     start_idx = max(0, len(df) - window_bars)
@@ -1919,23 +1919,37 @@ if run_requested:
 
         chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
-            plot_config = {
-                "displaylogo": False,
-                "scrollZoom": False,
-                "doubleClick": "reset",
-                "responsive": True,
-                "modeBarButtonsToRemove": [
-                    "zoom2d",
-                    "zoomIn2d",
-                    "zoomOut2d",
-                    "autoScale2d",
-                    "lasso2d",
-                    "select2d",
-                ],
-            }
+            if mobile_mode:
+                plot_config = {
+                    "displaylogo": False,
+                    "scrollZoom": False,
+                    "doubleClick": "reset",
+                    "responsive": True,
+                    "modeBarButtonsToRemove": [
+                        "zoom2d",
+                        "zoomIn2d",
+                        "zoomOut2d",
+                        "autoScale2d",
+                        "lasso2d",
+                        "select2d",
+                    ],
+                }
+            else:
+                plot_config = {
+                    "displaylogo": False,
+                    "scrollZoom": True,
+                    "doubleClick": "reset+autosize",
+                    "responsive": True,
+                    "modeBarButtonsToRemove": [
+                        "lasso2d",
+                        "select2d",
+                    ],
+                }
             st.plotly_chart(chart, use_container_width=True, config=plot_config)
             if mobile_mode:
                 st.caption("모바일 조작: 터치 후 끌어서 좌우 이동(팬) | 확대는 비활성화")
+            else:
+                st.caption("컴퓨터 조작: 마우스 드래그 확대(줌), 휠 확대/축소, 더블클릭 리셋")
         else:
             st.warning("현재 서버에 plotly가 없어 간단 차트로 표시합니다. requirements 재배포 후 캔들차트가 복구됩니다.")
             st.line_chart(df[["Close", "SMA20", "SMA60"]], use_container_width=True)
