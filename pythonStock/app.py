@@ -1009,6 +1009,59 @@ def fetch_krx_ohlcv_fdr(symbol: str, period: str) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 30)
+def get_kr_investor_ratio(symbol: str, lookback_days: int = 60) -> dict | None:
+    if not KRX_AVAILABLE:
+        return None
+    code = str(symbol).split(".")[0]
+    if (not code.isdigit()) or len(code) != 6:
+        return None
+
+    to_date = dt.date.today()
+    from_date = to_date - dt.timedelta(days=lookback_days)
+    from_s = from_date.strftime("%Y%m%d")
+    to_s = to_date.strftime("%Y%m%d")
+
+    try:
+        buy_df = krx_stock.get_market_trading_value_by_date(from_s, to_s, code, on="매수")
+        sell_df = krx_stock.get_market_trading_value_by_date(from_s, to_s, code, on="매도")
+    except Exception:
+        return None
+
+    if buy_df is None or buy_df.empty:
+        return None
+
+    def _col(df: pd.DataFrame, names: list[str]) -> float:
+        for n in names:
+            if n in df.columns:
+                try:
+                    return float(df[n].fillna(0).sum())
+                except Exception:
+                    return 0.0
+        return 0.0
+
+    foreign_buy = _col(buy_df, ["외국인합계", "외국인"])
+    individual_buy = _col(buy_df, ["개인"])
+
+    foreign_sell = _col(sell_df, ["외국인합계", "외국인"]) if sell_df is not None and not sell_df.empty else 0.0
+    individual_sell = _col(sell_df, ["개인"]) if sell_df is not None and not sell_df.empty else 0.0
+
+    total_buy = foreign_buy + individual_buy
+    foreign_buy_ratio = (foreign_buy / total_buy * 100.0) if total_buy > 0 else np.nan
+    individual_buy_ratio = (individual_buy / total_buy * 100.0) if total_buy > 0 else np.nan
+
+    foreign_net = foreign_buy - foreign_sell
+    individual_net = individual_buy - individual_sell
+
+    return {
+        "foreign_buy_ratio": foreign_buy_ratio,
+        "individual_buy_ratio": individual_buy_ratio,
+        "foreign_net": foreign_net,
+        "individual_net": individual_net,
+        "lookback_days": lookback_days,
+    }
+
+
 def fetch_price_data(ticker: str, market: str, period: str, interval: str, kr_exchange: str) -> tuple[pd.DataFrame, str, str]:
     tried: list[str] = []
     candidates: list[str] = []
@@ -1073,6 +1126,28 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rsi_prev = out["RSI"].shift(1)
     out["BuySignal"] = (rsi_prev < 30) & (out["RSI"] >= 30)
     out["SellSignal"] = (rsi_prev > 70) & (out["RSI"] <= 70)
+    return out
+
+
+def resample_price_data(df: pd.DataFrame, view_mode: str) -> pd.DataFrame:
+    if view_mode == "일별":
+        return df.copy()
+    rule_map = {
+        "주별": "W-FRI",
+        "월별": "M",
+        "년별": "Y",
+    }
+    rule = rule_map.get(view_mode)
+    if not rule:
+        return df.copy()
+    agg = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+    out = df.resample(rule).agg(agg).dropna(subset=["Open", "High", "Low", "Close"])
     return out
 
 
@@ -1346,10 +1421,10 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             low=df["Low"],
             close=df["Close"],
             name="Price",
-            increasing_line_color="#1f6feb",
-            increasing_fillcolor="#1f6feb",
-            decreasing_line_color="#d93025",
-            decreasing_fillcolor="#d93025",
+            increasing_line_color="#d93025",
+            increasing_fillcolor="#d93025",
+            decreasing_line_color="#1f6feb",
+            decreasing_fillcolor="#1f6feb",
         ),
         row=1,
         col=1,
@@ -1517,8 +1592,9 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                 row=1,
                 col=1,
             )
-        fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=1, col=1)
-        fig.update_xaxes(range=[df.index.min(), fdf.index.max() + pd.Timedelta(days=5)], row=2, col=1)
+        max_x = fdf.index.max() + pd.Timedelta(days=5)
+    else:
+        max_x = df.index.max() + pd.Timedelta(days=5)
 
     fig.add_trace(
         go.Scatter(
@@ -1538,12 +1614,23 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
         title=f"{ticker} Price / Signals",
         template="plotly_white",
         xaxis_rangeslider_visible=False,
-        height=620 if mobile_mode else 820,
+        height=900 if mobile_mode else 980,
         legend=dict(orientation="h", y=1.02, x=0.01),
         margin=dict(l=20, r=20, t=60, b=20),
+        dragmode="pan",
+        hovermode="x unified",
+        uirevision="keep_pan_state",
     )
     fig.update_xaxes(showgrid=True, gridcolor="#eef2f7")
     fig.update_yaxes(showgrid=True, gridcolor="#eef2f7")
+    fig.update_xaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=True)
+
+    window_bars = 120 if mobile_mode else 220
+    start_idx = max(0, len(df) - window_bars)
+    start_x = df.index[start_idx]
+    fig.update_xaxes(range=[start_x, max_x], row=1, col=1)
+    fig.update_xaxes(range=[start_x, max_x], row=2, col=1)
     return fig
 
 
@@ -1766,6 +1853,7 @@ if market == "KR":
 
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
+view_mode = st.sidebar.selectbox("그래프 보기 단위", ["일별", "주별", "월별", "년별"], index=0)
 forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
 forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", [3, 6, 12], index=2)
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
@@ -1808,11 +1896,15 @@ if run_requested:
     if raw.empty:
         st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
-        df = add_indicators(raw)
+        df_daily = add_indicators(raw)
+        view_raw = resample_price_data(raw, view_mode)
+        if view_raw.empty:
+            view_raw = raw.copy()
+        df = add_indicators(view_raw)
         forecast_model = FORECAST_MODELS[forecast_model_label]
-        forecast = build_forecast(df, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
-        forecast = enrich_forecast(df, forecast)
-        decision = compute_decision_score(df, forecast, market, exchange_choice)
+        forecast = build_forecast(df_daily, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
+        forecast = enrich_forecast(df_daily, forecast)
+        decision = compute_decision_score(df_daily, forecast, market, exchange_choice)
 
         company_name = get_company_name_by_symbol(resolved_symbol, market)
         if company_name:
@@ -1827,7 +1919,23 @@ if run_requested:
 
         chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
-            st.plotly_chart(chart, use_container_width=True)
+            plot_config = {
+                "displaylogo": False,
+                "scrollZoom": False,
+                "doubleClick": "reset",
+                "responsive": True,
+                "modeBarButtonsToRemove": [
+                    "zoom2d",
+                    "zoomIn2d",
+                    "zoomOut2d",
+                    "autoScale2d",
+                    "lasso2d",
+                    "select2d",
+                ],
+            }
+            st.plotly_chart(chart, use_container_width=True, config=plot_config)
+            if mobile_mode:
+                st.caption("모바일 조작: 터치 후 끌어서 좌우 이동(팬) | 확대는 비활성화")
         else:
             st.warning("현재 서버에 plotly가 없어 간단 차트로 표시합니다. requirements 재배포 후 캔들차트가 복구됩니다.")
             st.line_chart(df[["Close", "SMA20", "SMA60"]], use_container_width=True)
@@ -1855,6 +1963,17 @@ if run_requested:
             col2.metric("원화 환산가", f"{krw_value:,.0f} KRW" if krw_value is not None else "N/A")
             col3.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
             col4.metric("최신 신호", signal_text)
+
+        if market == "KR":
+            investor_ratio = get_kr_investor_ratio(resolved_symbol, lookback_days=60)
+            if investor_ratio is not None:
+                i1, i2, i3, i4 = st.columns(4)
+                i1.metric("외국인 매수비율(60일)", f"{investor_ratio['foreign_buy_ratio']:.1f}%")
+                i2.metric("개인 매수비율(60일)", f"{investor_ratio['individual_buy_ratio']:.1f}%")
+                i3.metric("외국인 순매수(60일)", f"{investor_ratio['foreign_net']:,.0f}")
+                i4.metric("개인 순매수(60일)", f"{investor_ratio['individual_net']:,.0f}")
+            else:
+                st.caption("외국인/개인 수급 비율 데이터: N/A")
 
         if forecast is not None:
             p1, p2, p3, p4, p5 = st.columns(5)
@@ -1900,7 +2019,7 @@ if run_requested:
             f"12M 예측 {comp['forecast_12m']:.0f}"
         )
 
-        equity, total_return, trade_count, win_rate = run_backtest(df)
+        equity, total_return, trade_count, win_rate = run_backtest(df_daily)
 
         if mobile_mode:
             st.metric("백테스트 수익률", f"{total_return:.2f}%")
@@ -1917,7 +2036,7 @@ if run_requested:
         st.line_chart(equity_df, use_container_width=True)
 
         st.subheader("최근 신호")
-        signal_table = df.loc[df["BuySignal"] | df["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
+        signal_table = df_daily.loc[df_daily["BuySignal"] | df_daily["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
         st.dataframe(signal_table, use_container_width=True)
 else:
     st.info(
