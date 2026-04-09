@@ -265,6 +265,36 @@ def _save_krx_snapshot_rows(rows: list[dict[str, str]]) -> None:
         pass
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 10)
+def get_krx_universe_df(exchange_filter: str = "전체") -> pd.DataFrame:
+    rows = get_krx_universe(exchange_filter)
+    if not rows:
+        return pd.DataFrame(columns=["name", "symbol", "exchange", "currency", "price", "name_norm", "symbol_norm"])
+    df = pd.DataFrame(rows)
+    for col in ["name", "symbol", "exchange", "currency", "price"]:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[["name", "symbol", "exchange", "currency", "price"]].fillna("")
+    df["name_norm"] = df["name"].astype(str).str.replace(" ", "", regex=False).str.lower()
+    df["symbol_norm"] = df["symbol"].astype(str).str.replace(".", "", regex=False).str.lower()
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def get_us_universe_df() -> pd.DataFrame:
+    rows = get_us_universe()
+    if not rows:
+        return pd.DataFrame(columns=["name", "symbol", "exchange", "currency", "price", "name_norm", "symbol_norm"])
+    df = pd.DataFrame(rows)
+    for col in ["name", "symbol", "exchange", "currency", "price"]:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[["name", "symbol", "exchange", "currency", "price"]].fillna("")
+    df["name_norm"] = df["name"].astype(str).str.replace(" ", "", regex=False).str.lower()
+    df["symbol_norm"] = df["symbol"].astype(str).str.lower()
+    return df
+
+
 def load_user_state() -> dict:
     if not APP_STATE_PATH.exists():
         return {"recent": [], "favorites": []}
@@ -325,15 +355,15 @@ def get_company_name_by_symbol(symbol: str, market: str) -> str:
                 pass
         suffix = ".KQ" if sym.endswith(".KQ") else (".KS" if sym.endswith(".KS") else "")
         if suffix:
-            rows = get_krx_universe("KOSDAQ" if suffix == ".KQ" else "KOSPI")
-            for row in rows:
-                if str(row.get("symbol", "")).strip().upper() == sym:
-                    return str(row.get("name", "")).strip()
+            df = get_krx_universe_df("KOSDAQ" if suffix == ".KQ" else "KOSPI")
+            matched = df.loc[df["symbol"].astype(str).str.upper() == sym, "name"]
+            if not matched.empty:
+                return str(matched.iloc[0]).strip()
         return ""
-    rows = get_us_universe()
-    for row in rows:
-        if str(row.get("symbol", "")).strip().upper() == sym:
-            return str(row.get("name", "")).strip()
+    df = get_us_universe_df()
+    matched = df.loc[df["symbol"].astype(str).str.upper() == sym, "name"]
+    if not matched.empty:
+        return str(matched.iloc[0]).strip()
     return ""
 
 
@@ -672,12 +702,19 @@ def get_krx_index_constituents(index_key: str) -> list[dict[str, str]]:
         "KOSDAQ100": 100,
     }
 
-    rows = get_krx_universe()
+    rows_df = get_krx_universe_df()
     by_code = {}
-    for r in rows:
-        code = str(r.get("symbol", "")).split(".")[0]
-        if len(code) == 6 and code.isdigit():
-            by_code[code] = r
+    if not rows_df.empty:
+        for _, r in rows_df.iterrows():
+            code = str(r.get("symbol", "")).split(".")[0]
+            if len(code) == 6 and code.isdigit():
+                by_code[code] = {
+                    "name": str(r.get("name", "")),
+                    "symbol": str(r.get("symbol", "")),
+                    "exchange": str(r.get("exchange", "")),
+                    "currency": str(r.get("currency", "")),
+                    "price": str(r.get("price", "-")),
+                }
 
     out: list[dict[str, str]] = []
     code_set: set[str] = set()
@@ -748,21 +785,22 @@ def get_theme_candidates(theme: str, market: str, exchange_choice: str = "전체
         return []
 
     if market == "KR":
-        rows = get_krx_universe(exchange_choice)
+        rows_df = get_krx_universe_df(exchange_choice)
         seeds = set(THEME_KR_SEEDS.get(theme, []))
         keys = [k.lower() for k in THEME_KEYWORDS.get(theme, [])]
-        matched = []
 
         # Primary path: full KRX universe match
-        if rows:
+        if not rows_df.empty:
             seed_norm = {s.replace(" ", "").lower() for s in seeds}
-            for row in rows:
-                name = row["name"]
-                lname = name.lower()
-                nkey = name.replace(" ", "").lower()
-                if (nkey in seed_norm) or any(k in lname for k in keys):
-                    matched.append(row)
-            return dedupe_rows(matched, limit=limit)
+            mask = rows_df["name_norm"].isin(seed_norm)
+            if keys:
+                safe_keys = [re.escape(k) for k in keys if k]
+                if safe_keys:
+                    regex = "|".join(safe_keys)
+                    mask = mask | rows_df["name"].astype(str).str.lower().str.contains(regex, regex=True, na=False)
+            matched_df = rows_df.loc[mask, ["name", "symbol", "exchange", "currency", "price"]]
+            if not matched_df.empty:
+                return dedupe_rows(matched_df.to_dict("records"), limit=limit)
 
         # Fallback path: when pykrx universe is unavailable on runtime
         # Use seed names + keyword search through Yahoo lookup.
@@ -799,29 +837,28 @@ def search_candidates(query: str, market: str, exchange_choice: str = "전체", 
     key = keyword.replace(" ", "").lower()
 
     if market == "KR":
-        krx_rows = get_krx_universe(exchange_choice)
-        if krx_rows:
-            matched = []
-            for row in krx_rows:
-                row_key = row["name"].replace(" ", "").lower()
-                symbol_key = row["symbol"].replace(".", "").lower()
-                if key in row_key or key in symbol_key:
-                    matched.append(row)
-            matched.sort(key=lambda x: (x["name"].replace(" ", "").lower() != key, x["name"]))
-            if matched:
-                return matched[:max_results]
+        krx_df = get_krx_universe_df(exchange_choice)
+        if not krx_df.empty:
+            mask = krx_df["name_norm"].str.contains(re.escape(key), regex=True, na=False) | krx_df["symbol_norm"].str.contains(
+                re.escape(key), regex=True, na=False
+            )
+            matched_df = krx_df.loc[mask, ["name", "symbol", "exchange", "currency", "price", "name_norm"]].copy()
+            if not matched_df.empty:
+                matched_df["_exact_first"] = (matched_df["name_norm"] != key).astype(int)
+                matched_df = matched_df.sort_values(by=["_exact_first", "name"])
+                return matched_df[["name", "symbol", "exchange", "currency", "price"]].head(max_results).to_dict("records")
     else:
-        us_rows = get_us_universe()
-        if us_rows:
-            matched = []
-            for row in us_rows:
-                row_key = row["name"].replace(" ", "").lower()
-                symbol_key = row["symbol"].lower()
-                if key in row_key or key in symbol_key:
-                    matched.append(row)
-            matched.sort(key=lambda x: (x["symbol"].lower() != key and x["name"].replace(" ", "").lower() != key, x["name"]))
-            if matched:
-                return matched[:max_results]
+        us_df = get_us_universe_df()
+        if not us_df.empty:
+            mask = us_df["name_norm"].str.contains(re.escape(key), regex=True, na=False) | us_df["symbol_norm"].str.contains(
+                re.escape(key), regex=True, na=False
+            )
+            matched_df = us_df.loc[mask, ["name", "symbol", "exchange", "currency", "price", "name_norm", "symbol_norm"]].copy()
+            if not matched_df.empty:
+                exact_rank = ((matched_df["symbol_norm"] != key) & (matched_df["name_norm"] != key)).astype(int)
+                matched_df["_exact_first"] = exact_rank
+                matched_df = matched_df.sort_values(by=["_exact_first", "name"])
+                return matched_df[["name", "symbol", "exchange", "currency", "price"]].head(max_results).to_dict("records")
 
     results: list[dict[str, str]] = []
     try:
@@ -879,26 +916,27 @@ def resolve_ticker(raw_input: str, market: str, kr_exchange: str, exchange_choic
 
     if market == "KR":
         scope_exchange = exchange_choice if exchange_choice in {"KOSPI", "KOSDAQ", "KONEX"} else "전체"
-        kr_rows = get_krx_universe(scope_exchange)
-        for row in kr_rows:
-            row_key = row["name"].replace(" ", "").lower()
-            if row_key == key:
-                return row["symbol"], "krx_exact"
-        for row in kr_rows:
-            row_key = row["name"].replace(" ", "").lower()
-            if key and key in row_key:
-                return row["symbol"], "krx_partial"
+        kr_df = get_krx_universe_df(scope_exchange)
+        if not kr_df.empty:
+            exact_df = kr_df.loc[kr_df["name_norm"] == key, "symbol"]
+            if not exact_df.empty:
+                return str(exact_df.iloc[0]), "krx_exact"
+            partial_df = kr_df.loc[kr_df["name_norm"].str.contains(re.escape(key), regex=True, na=False), "symbol"]
+            if key and not partial_df.empty:
+                return str(partial_df.iloc[0]), "krx_partial"
     else:
-        for row in get_us_universe():
-            row_name = row["name"].replace(" ", "").lower()
-            row_symbol = row["symbol"].lower()
-            if key == row_symbol or key == row_name:
-                return row["symbol"], "us_exact"
-        for row in get_us_universe():
-            row_name = row["name"].replace(" ", "").lower()
-            row_symbol = row["symbol"].lower()
-            if key and (key in row_name or key in row_symbol):
-                return row["symbol"], "us_partial"
+        us_df = get_us_universe_df()
+        if not us_df.empty:
+            exact_df = us_df.loc[(us_df["symbol_norm"] == key) | (us_df["name_norm"] == key), "symbol"]
+            if not exact_df.empty:
+                return str(exact_df.iloc[0]), "us_exact"
+            partial_df = us_df.loc[
+                us_df["name_norm"].str.contains(re.escape(key), regex=True, na=False)
+                | us_df["symbol_norm"].str.contains(re.escape(key), regex=True, na=False),
+                "symbol",
+            ]
+            if key and not partial_df.empty:
+                return str(partial_df.iloc[0]), "us_partial"
 
     if "." in symbol or (symbol.isalnum() and len(symbol) <= 6 and symbol == symbol.upper()):
         return symbol, "direct"
