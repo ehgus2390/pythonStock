@@ -1382,6 +1382,55 @@ def compute_decision_score(df: pd.DataFrame, forecast: dict | None, market: str,
     }
 
 
+def analyze_trade_setup(df: pd.DataFrame, forecast: dict | None, decision: dict, investment_amount: float) -> dict:
+    latest_close = float(df["Close"].iloc[-1])
+    out = {
+        "max_loss_pct": np.nan,
+        "max_loss_amount": np.nan,
+        "reward_risk_ratio": np.nan,
+        "mandatory_pass": False,
+        "mandatory_pass_count": 0,
+        "mandatory_conditions": {},
+    }
+    if forecast is None or "path" not in forecast or forecast["path"] is None or forecast["path"].empty:
+        return out
+
+    fdf = forecast["path"]
+    bear_series = fdf["Bear"] if "Bear" in fdf.columns else fdf["Forecast"]
+    bull_series = fdf["Bull"] if "Bull" in fdf.columns else fdf["Forecast"]
+
+    worst_future_price = float(pd.Series(bear_series).min())
+    best_future_price = float(pd.Series(bull_series).max())
+
+    max_loss_pct = (worst_future_price / latest_close - 1.0) * 100.0
+    max_gain_pct = (best_future_price / latest_close - 1.0) * 100.0
+    downside_pct = abs(min(max_loss_pct, 0.0))
+    upside_pct = max(max_gain_pct, 0.0)
+    reward_risk_ratio = (upside_pct / downside_pct) if downside_pct > 0 else np.nan
+
+    cond_trend = bool(decision["component_scores"].get("trend_momentum", 0.0) >= 60.0)
+    cond_rs = bool(decision["component_scores"].get("relative_strength", 0.0) >= 70.0)
+    cond_forecast = bool(float(forecast.get("ret_6m", np.nan)) > 0 and float(forecast.get("ret_12m", np.nan)) > 0)
+    mandatory_conditions = {
+        "trend_momentum": cond_trend,
+        "relative_strength": cond_rs,
+        "positive_mid_long_forecast": cond_forecast,
+    }
+    pass_count = sum(1 for x in mandatory_conditions.values() if x)
+
+    out.update(
+        {
+            "max_loss_pct": max_loss_pct,
+            "max_loss_amount": investment_amount * (max_loss_pct / 100.0),
+            "reward_risk_ratio": reward_risk_ratio,
+            "mandatory_pass": pass_count == len(mandatory_conditions),
+            "mandatory_pass_count": pass_count,
+            "mandatory_conditions": mandatory_conditions,
+        }
+    )
+    return out
+
+
 def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
     if ML_FORECAST_AVAILABLE and build_ml_forecast is not None:
         return build_ml_forecast(df, model_name=model_name, horizon_days=horizon_days)
@@ -1943,6 +1992,7 @@ if run_requested:
         forecast = build_forecast(df_daily, model_name=forecast_model, horizon_days=forecast_horizon_months * 21)
         forecast = enrich_forecast(df_daily, forecast)
         decision = compute_decision_score(df_daily, forecast, market, exchange_choice)
+        trade_setup = analyze_trade_setup(df_daily, forecast, decision, investment_amount)
 
         company_name = get_company_name_by_symbol(resolved_symbol, market)
         if company_name:
@@ -2069,6 +2119,20 @@ if run_requested:
             f"변동성 돌파 {comp['volatility_breakout']:.0f}, "
             f"상대강도 {comp['relative_strength']:.0f}, "
             f"12M 예측 {comp['forecast_12m']:.0f}"
+        )
+        r1c, r2c, r3c = st.columns(3)
+        r1c.metric("예상 최대손실", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
+        r2c.metric("손익비", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
+        r3c.metric(
+            "매수 필수조건",
+            "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
+        )
+        cond = trade_setup["mandatory_conditions"]
+        st.caption(
+            "필수조건 | "
+            f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
+            f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
+            f"6M·12M 예측 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
         )
 
         equity, total_return, trade_count, win_rate = run_backtest(df_daily)
