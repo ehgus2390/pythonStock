@@ -2031,7 +2031,8 @@ forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)"
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
-run_requested = st.sidebar.button("분석 시작") or bool(quick_symbol) or bool(kosdaq_selected_symbol)
+analyze_clicked = st.sidebar.button("분석 시작")
+run_requested = analyze_clicked or bool(quick_symbol) or bool(kosdaq_selected_symbol)
 
 if show_kosdaq_list:
     with st.expander("KOSDAQ 상장사 전체 목록", expanded=False):
@@ -2061,7 +2062,37 @@ if run_requested:
     if not ticker:
         st.error("티커 또는 회사명을 입력하세요.")
         st.stop()
+    st.session_state["last_analysis_request"] = {
+        "ticker": ticker,
+        "source": source,
+        "market": market,
+        "period": period,
+        "interval": interval,
+        "kr_exchange": kr_exchange,
+        "exchange_choice": exchange_choice,
+        "view_mode": view_mode,
+        "forecast_model_label": forecast_model_label,
+        "forecast_horizon_months": forecast_horizon_months,
+        "investment_amount": float(investment_amount),
+        "mobile_mode": bool(mobile_mode),
+    }
+elif "last_analysis_request" in st.session_state:
+    req = st.session_state["last_analysis_request"]
+    ticker = req["ticker"]
+    source = req.get("source", "session")
+    market = req.get("market", market)
+    period = req.get("period", period)
+    interval = req.get("interval", interval)
+    kr_exchange = req.get("kr_exchange", kr_exchange)
+    exchange_choice = req.get("exchange_choice", exchange_choice)
+    view_mode = req.get("view_mode", view_mode)
+    forecast_model_label = req.get("forecast_model_label", forecast_model_label)
+    forecast_horizon_months = int(req.get("forecast_horizon_months", forecast_horizon_months))
+    investment_amount = float(req.get("investment_amount", investment_amount))
+    mobile_mode = bool(req.get("mobile_mode", mobile_mode))
+    run_requested = True
 
+if run_requested:
     with st.spinner("데이터를 가져오고 지표를 계산하는 중..."):
         raw, data_source, resolved_symbol = fetch_price_data(ticker, market, period, interval, kr_exchange)
 
