@@ -6,3 +6,4 @@ numpy==2.3.3
 pykrx==1.0.51
 scikit-learn==1.6.1
 finance-datareader==0.9.94
+openai==2.9.0

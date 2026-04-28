@@ -1,5 +1,6 @@
 ﻿import datetime as dt
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -9,6 +10,14 @@ import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
+
+try:
+    from openai import OpenAI
+
+    OPENAI_AVAILABLE = True
+except ModuleNotFoundError:
+    OpenAI = None
+    OPENAI_AVAILABLE = False
 
 try:
     from pykrx import stock as krx_stock
@@ -1431,6 +1440,82 @@ def analyze_trade_setup(df: pd.DataFrame, forecast: dict | None, decision: dict,
     return out
 
 
+def _get_openai_api_key() -> str:
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        key = ""
+    return str(key or os.getenv("OPENAI_API_KEY", "")).strip()
+
+
+def build_ai_analysis_payload(
+    resolved_symbol: str,
+    company_name: str,
+    market: str,
+    latest: pd.Series,
+    forecast: dict | None,
+    decision: dict,
+    trade_setup: dict,
+    investor_ratio: dict | None,
+    total_return: float,
+    trade_count: int,
+    win_rate: float,
+) -> dict:
+    payload = {
+        "symbol": resolved_symbol,
+        "company_name": company_name or "",
+        "market": market,
+        "current_price": float(latest["Close"]),
+        "rsi_14": float(latest["RSI"]) if pd.notna(latest.get("RSI", np.nan)) else None,
+        "decision": decision,
+        "trade_setup": trade_setup,
+        "backtest": {
+            "total_return_pct": float(total_return),
+            "trade_count": int(trade_count),
+            "win_rate_pct": float(win_rate),
+        },
+        "investor_flow_60d": investor_ratio,
+    }
+    if forecast is not None:
+        payload["forecast"] = {
+            "ret_1m_pct": float(forecast.get("ret_1m", np.nan)),
+            "ret_2m_pct": float(forecast.get("ret_2m", np.nan)),
+            "ret_3m_pct": float(forecast.get("ret_3m", np.nan)),
+            "ret_6m_pct": float(forecast.get("ret_6m", np.nan)),
+            "ret_12m_pct": float(forecast.get("ret_12m", np.nan)),
+            "ret_12m_bull_pct": float(forecast.get("ret_12m_bull", np.nan)),
+            "ret_12m_bear_pct": float(forecast.get("ret_12m_bear", np.nan)),
+            "signal_label": str(forecast.get("signal_label", "")),
+            "confidence_pct": float(forecast.get("confidence", np.nan)),
+        }
+    return payload
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 20)
+def generate_ai_analysis(payload_json: str, model: str = "gpt-5.2") -> str:
+    if not OPENAI_AVAILABLE:
+        return "OpenAI 패키지가 설치되어 있지 않습니다. requirements.txt 배포 후 다시 시도하세요."
+    api_key = _get_openai_api_key()
+    if not api_key:
+        return "OPENAI_API_KEY가 설정되어 있지 않습니다. Streamlit Secrets 또는 환경변수에 API 키를 추가하세요."
+
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model=model,
+        instructions=(
+            "너는 주식 분석 웹의 보조 해설자다. 사용자가 제공한 계산 결과만 근거로 한국어로 설명한다. "
+            "새로운 가격, 뉴스, 실적, 재무정보를 추측하지 않는다. 투자 권유처럼 단정하지 말고 "
+            "'데이터상', '조건상', '주의' 표현을 사용한다. 마지막에는 참고용 분석이며 최종 판단은 사용자 책임이라고 짧게 적는다."
+        ),
+        input=(
+            "아래 JSON은 앱이 계산한 주식 분석 결과다. "
+            "1) 핵심 요약 4줄, 2) 긍정 요인, 3) 위험 요인, 4) 지금 확인할 조건을 간결하게 작성하라.\n\n"
+            f"{payload_json}"
+        ),
+    )
+    return response.output_text
+
+
 def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
     if ML_FORECAST_AVAILABLE and build_ml_forecast is not None:
         return build_ml_forecast(df, model_name=model_name, horizon_days=horizon_days)
@@ -1983,6 +2068,7 @@ if run_requested:
     if raw.empty:
         st.error("데이터를 가져오지 못했습니다. 예: 애플/AAPL, 삼성전자/005930, 한화에어로스페이스")
     else:
+        investor_ratio = None
         df_daily = add_indicators(raw)
         view_raw = resample_price_data(raw, view_mode)
         if view_raw.empty:
@@ -2136,6 +2222,26 @@ if run_requested:
         )
 
         equity, total_return, trade_count, win_rate = run_backtest(df_daily)
+
+        st.subheader("AI 분석 요약")
+        ai_payload = build_ai_analysis_payload(
+            resolved_symbol=resolved_symbol,
+            company_name=company_name,
+            market=market,
+            latest=latest,
+            forecast=forecast,
+            decision=decision,
+            trade_setup=trade_setup,
+            investor_ratio=investor_ratio,
+            total_return=total_return,
+            trade_count=trade_count,
+            win_rate=win_rate,
+        )
+        if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
+            with st.spinner("AI가 계산 결과를 요약하는 중..."):
+                ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
+            st.write(ai_text)
+        st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
 
         if mobile_mode:
             st.metric("백테스트 수익률", f"{total_return:.2f}%")
