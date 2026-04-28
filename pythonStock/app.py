@@ -1492,28 +1492,35 @@ def build_ai_analysis_payload(
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 20)
-def generate_ai_analysis(payload_json: str, model: str = "gpt-5.2") -> str:
+def generate_ai_analysis(payload_json: str, model: str = "gpt-5.4-mini") -> str:
     if not OPENAI_AVAILABLE:
         return "OpenAI 패키지가 설치되어 있지 않습니다. requirements.txt 배포 후 다시 시도하세요."
     api_key = _get_openai_api_key()
     if not api_key:
         return "OPENAI_API_KEY가 설정되어 있지 않습니다. Streamlit Secrets 또는 환경변수에 API 키를 추가하세요."
 
-    client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model=model,
-        instructions=(
-            "너는 주식 분석 웹의 보조 해설자다. 사용자가 제공한 계산 결과만 근거로 한국어로 설명한다. "
-            "새로운 가격, 뉴스, 실적, 재무정보를 추측하지 않는다. 투자 권유처럼 단정하지 말고 "
-            "'데이터상', '조건상', '주의' 표현을 사용한다. 마지막에는 참고용 분석이며 최종 판단은 사용자 책임이라고 짧게 적는다."
-        ),
-        input=(
-            "아래 JSON은 앱이 계산한 주식 분석 결과다. "
-            "1) 핵심 요약 4줄, 2) 긍정 요인, 3) 위험 요인, 4) 지금 확인할 조건을 간결하게 작성하라.\n\n"
-            f"{payload_json}"
-        ),
-    )
-    return response.output_text
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=model,
+            instructions=(
+                "너는 주식 분석 웹의 보조 해설자다. 사용자가 제공한 계산 결과만 근거로 한국어로 설명한다. "
+                "새로운 가격, 뉴스, 실적, 재무정보를 추측하지 않는다. 투자 권유처럼 단정하지 말고 "
+                "'데이터상', '조건상', '주의' 표현을 사용한다. 마지막에는 참고용 분석이며 최종 판단은 사용자 책임이라고 짧게 적는다."
+            ),
+            input=(
+                "아래 JSON은 앱이 계산한 주식 분석 결과다. "
+                "1) 핵심 요약 4줄, 2) 긍정 요인, 3) 위험 요인, 4) 지금 확인할 조건을 간결하게 작성하라.\n\n"
+                f"{payload_json}"
+            ),
+        )
+        return response.output_text
+    except Exception as exc:
+        err_name = type(exc).__name__
+        err_text = str(exc).lower()
+        if "rate" in err_text or "quota" in err_text or err_name in {"RateLimitError", "APIStatusError"}:
+            return "AI 요약을 생성하지 못했습니다. OpenAI 사용량 한도 또는 결제/쿼터 제한에 걸린 상태입니다. 잠시 후 다시 시도하거나 OpenAI 결제/사용량 설정을 확인하세요."
+        return f"AI 요약을 생성하지 못했습니다. 오류 유형: {err_name}"
 
 
 def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days: int = 252) -> dict | None:
@@ -2271,7 +2278,10 @@ if run_requested:
         if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
             with st.spinner("AI가 계산 결과를 요약하는 중..."):
                 ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
-            st.write(ai_text)
+            if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
+                st.warning(ai_text)
+            else:
+                st.write(ai_text)
         st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
 
         if mobile_mode:
