@@ -65,7 +65,13 @@ except Exception:
 
 
 st.set_page_config(page_title="Python Stock", layout="wide")
-st.title("주식 분석 웹 (차트 + RSI + 매수/매도 신호 + 테마 + 1~12개월 예측)")
+st.title("주식 데이터 대시보드 (차트 + RSI + 조건 신호 + 테마 + 시나리오)")
+DISCLAIMER_TEXT = (
+    "본 서비스는 주식 데이터 시각화 및 정량 분석 도구이며, 특정 금융투자상품의 매수·매도 추천 또는 "
+    "투자자문을 제공하지 않습니다. 표시되는 조건 신호, 시나리오 변화율, 참고 금액은 과거 데이터 기반의 "
+    "참고 정보이며 미래 수익을 보장하지 않습니다. 모든 투자 판단과 손익 책임은 사용자 본인에게 있습니다."
+)
+st.warning(DISCLAIMER_TEXT, icon="⚠️")
 
 
 NAME_ALIASES = {
@@ -1493,10 +1499,10 @@ def compute_decision_score(df: pd.DataFrame, forecast: dict | None, market: str,
 
     if buy_score >= 65:
         decision = "BUY"
-        decision_label = "매수 우세"
+        decision_label = "상승 조건 우세"
     elif buy_score <= 35:
         decision = "SELL"
-        decision_label = "매도 우세"
+        decision_label = "하락 위험 우세"
     else:
         decision = "HOLD"
         decision_label = "관망"
@@ -1645,11 +1651,13 @@ def generate_ai_analysis(payload_json: str, model: str = "gpt-5.4-mini") -> str:
             instructions=(
                 "너는 주식 분석 웹의 보조 해설자다. 사용자가 제공한 계산 결과만 근거로 한국어로 설명한다. "
                 "새로운 가격, 뉴스, 실적, 재무정보를 추측하지 않는다. 투자 권유처럼 단정하지 말고 "
-                "'데이터상', '조건상', '주의' 표현을 사용한다. 마지막에는 참고용 분석이며 최종 판단은 사용자 책임이라고 짧게 적는다."
+                "'매수', '매도', '추천', '진입', '청산' 같은 행동 지시 표현을 피한다. "
+                "'데이터상', '조건상', '주의', '시나리오' 표현을 사용한다. "
+                "마지막에는 참고용 데이터 해설이며 투자자문이 아니고 최종 판단은 사용자 책임이라고 짧게 적는다."
             ),
             input=(
                 "아래 JSON은 앱이 계산한 주식 분석 결과다. "
-                "1) 핵심 요약 4줄, 2) 긍정 요인, 3) 위험 요인, 4) 지금 확인할 조건을 간결하게 작성하라.\n\n"
+                "1) 핵심 데이터 요약 4줄, 2) 우호적 조건, 3) 위험 조건, 4) 추가 확인할 조건을 간결하게 작성하라.\n\n"
                 f"{payload_json}"
             ),
         )
@@ -1696,10 +1704,10 @@ def build_forecast(df: pd.DataFrame, model_name: str = "baseline", horizon_days:
 
     if ret_12m >= 8:
         signal = "BUY"
-        signal_label = "예상 매수지점"
+        signal_label = "상승 관찰 구간"
     elif ret_12m <= -8:
         signal = "SELL"
-        signal_label = "예상 매도지점"
+        signal_label = "위험 관찰 구간"
     else:
         signal = "HOLD"
         signal_label = "관망"
@@ -1780,7 +1788,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             y=buy_df["Low"] * 0.995,
             mode="markers",
             marker=dict(symbol="triangle-up", size=11, color="#7b2cbf"),
-            name="Buy",
+            name="상승 조건",
         ),
         row=1,
         col=1,
@@ -1792,7 +1800,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
             y=sell_df["High"] * 1.005,
             mode="markers",
             marker=dict(symbol="triangle-down", size=11, color="#ff8f00"),
-            name="Sell",
+            name="하락 위험",
         ),
         row=1,
         col=1,
@@ -1812,7 +1820,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                 x=fdf.index,
                 y=fdf["Forecast"],
                 mode="lines",
-                name=f"예측 경로({horizon_months}개월)",
+                name=f"시나리오 경로({horizon_months}개월)",
                 line=dict(color=fc_color, width=3, dash="dot"),
             ),
             row=1,
@@ -1858,7 +1866,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                     x=hx,
                     y=hy,
                     mode="markers+text",
-                    name="예측 구간",
+                    name="시나리오 구간",
                     marker=dict(symbol="circle", size=7, color=fc_color, line=dict(width=1, color="#495057")),
                     text=htext,
                     textposition="top center",
@@ -1872,7 +1880,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                 x=[df.index[-1]],
                 y=[df["Close"].iloc[-1]],
                 mode="markers+text",
-                name="예측 신호",
+                name="시나리오 신호",
                 marker=dict(symbol="diamond", size=12, color=marker_color),
                 text=[forecast["signal_label"]],
                 textposition="top center",
@@ -1887,9 +1895,9 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                     x=[ep["x"]],
                     y=[ep["y"]],
                     mode="markers+text",
-                    name="예상 매수지점",
+                    name="상승 관찰 가격대",
                     marker=dict(symbol="triangle-up", size=14, color="#2b8a3e"),
-                    text=["예상 매수지점"],
+                    text=["상승 관찰 가격대"],
                     textposition="bottom right",
                 ),
                 row=1,
@@ -1902,9 +1910,9 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
                     x=[xp["x"]],
                     y=[xp["y"]],
                     mode="markers+text",
-                    name="예상 매도지점",
+                    name="위험 관찰 가격대",
                     marker=dict(symbol="triangle-down", size=14, color="#c92a2a"),
-                    text=["예상 매도지점"],
+                    text=["위험 관찰 가격대"],
                     textposition="top right",
                 ),
                 row=1,
@@ -1929,7 +1937,7 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
     fig.add_hline(y=30, line_dash="dot", line_color="#0d47a1", row=2, col=1)
 
     fig.update_layout(
-        title=f"{ticker} Price / Signals",
+        title=f"{ticker} Price / Conditions",
         template="plotly_dark",
         paper_bgcolor="#0b0f19",
         plot_bgcolor="#0b0f19",
@@ -1996,6 +2004,7 @@ if billing_enabled:
         for product in BILLING_PRODUCTS.values():
             st.write(f"{product['label']}: {product['price_krw']:,}원")
         st.caption("현재는 관리자 충전 코드 방식입니다. 이후 Toss/Stripe 결제 승인 후 자동 충전으로 교체합니다.")
+        st.caption("결제는 데이터 편의 기능 이용권이며, 투자 추천 또는 수익 보장을 의미하지 않습니다.")
 else:
     st.sidebar.caption("과금 모드 꺼짐: `BILLING_ENABLED=true` 설정 시 사용자별 크레딧 차감이 활성화됩니다.")
 
@@ -2005,17 +2014,17 @@ favorite_symbols = current_user_record.get("favorites", [])
 if "is_premium" not in st.session_state:
     st.session_state["is_premium"] = False
 
-st.sidebar.markdown("**멤버십**")
-premium_code = st.sidebar.text_input("프리미엄 코드", type="password", value="", placeholder="코드 입력")
-if st.sidebar.button("프리미엄 활성화"):
+st.sidebar.markdown("**확장 기능**")
+premium_code = st.sidebar.text_input("확장 기능 코드", type="password", value="", placeholder="코드 입력")
+if st.sidebar.button("확장 기능 활성화"):
     if verify_premium_code(premium_code):
         st.session_state["is_premium"] = True
-        st.sidebar.success("프리미엄 기능이 활성화되었습니다.")
+        st.sidebar.success("확장 데이터 기능이 활성화되었습니다.")
     else:
-        st.sidebar.warning("프리미엄 코드가 올바르지 않습니다.")
+        st.sidebar.warning("확장 기능 코드가 올바르지 않습니다.")
 if st.session_state["is_premium"]:
-    st.sidebar.caption("현재 플랜: 프리미엄")
-    if st.sidebar.button("프리미엄 해제"):
+    st.sidebar.caption("현재 플랜: 확장 데이터")
+    if st.sidebar.button("확장 기능 해제"):
         st.session_state["is_premium"] = False
         st.rerun()
 else:
@@ -2023,7 +2032,7 @@ else:
 has_credit_access = billing_enabled and int(current_user_record.get("credits", 0) or 0) > 0
 is_premium = bool(st.session_state["is_premium"] or has_credit_access)
 if billing_enabled and has_credit_access:
-    st.sidebar.caption("유료 크레딧 보유: 프리미엄 분석 기능 사용 가능")
+    st.sidebar.caption("유료 크레딧 보유: 확장 데이터 기능 사용 가능")
 
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
@@ -2240,11 +2249,11 @@ if market == "KR":
 period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=2)
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 view_mode = st.sidebar.selectbox("그래프 보기 단위", ["일별", "주별", "월별", "년별"], index=0)
-forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
+forecast_model_label = st.sidebar.selectbox("시나리오 모델", list(FORECAST_MODELS.keys()), index=0)
 forecast_horizon_options = [3, 6, 12] if is_premium else [3]
-forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", forecast_horizon_options, index=len(forecast_horizon_options) - 1)
+forecast_horizon_months = st.sidebar.selectbox("시나리오 그래프 기간(개월)", forecast_horizon_options, index=len(forecast_horizon_options) - 1)
 if not is_premium:
-    st.sidebar.caption("6개월/12개월 예측은 프리미엄 기능입니다.")
+    st.sidebar.caption("6개월/12개월 시나리오는 확장 데이터 기능입니다.")
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
@@ -2394,9 +2403,9 @@ if run_requested:
         usdkrw_rate = get_usdkrw_rate()
         krw_value = convert_to_krw(float(latest["Close"]), quote_currency, usdkrw_rate)
         if bool(latest["BuySignal"]):
-            signal_text = "매수"
+            signal_text = "상승 조건"
         elif bool(latest["SellSignal"]):
-            signal_text = "매도"
+            signal_text = "하락 위험"
         else:
             signal_text = "관망"
 
@@ -2405,13 +2414,13 @@ if run_requested:
             if krw_value is not None:
                 st.metric("원화 환산가", f"{krw_value:,.0f} KRW")
             st.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
-            st.metric("최신 신호", signal_text)
+            st.metric("최신 조건 신호", signal_text)
         else:
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("현재가", f"{latest['Close']:.2f}")
             col2.metric("원화 환산가", f"{krw_value:,.0f} KRW" if krw_value is not None else "N/A")
             col3.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
-            col4.metric("최신 신호", signal_text)
+            col4.metric("최신 조건 신호", signal_text)
 
         if market == "KR" and is_premium:
             investor_ratio = get_kr_investor_ratio(resolved_symbol, lookback_days=60)
@@ -2424,23 +2433,23 @@ if run_requested:
             else:
                 st.caption("외국인/개인 수급 비율 데이터: N/A")
         elif market == "KR":
-            st.info("외국인/개인 수급 분석은 프리미엄 기능입니다.")
+            st.info("외국인/개인 수급 분석은 확장 데이터 기능입니다.")
 
         if forecast is not None:
             if is_premium:
                 p1, p2, p3, p4, p5 = st.columns(5)
-                p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
-                p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
-                p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
-                p4.metric("예상 수익률(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
-                p5.metric("예상 수익률(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
+                p1.metric("시나리오 변화율(1개월)", f"{forecast['ret_1m']:.2f}%")
+                p2.metric("시나리오 변화율(2개월)", f"{forecast['ret_2m']:.2f}%")
+                p3.metric("시나리오 변화율(3개월)", f"{forecast['ret_3m']:.2f}%")
+                p4.metric("시나리오 변화율(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
+                p5.metric("시나리오 변화율(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
             else:
                 p1, p2, p3 = st.columns(3)
-                p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
-                p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
-                p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
-                st.info("6개월/1년 예측과 시나리오 손익은 프리미엄 기능입니다.")
-            st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
+                p1.metric("시나리오 변화율(1개월)", f"{forecast['ret_1m']:.2f}%")
+                p2.metric("시나리오 변화율(2개월)", f"{forecast['ret_2m']:.2f}%")
+                p3.metric("시나리오 변화율(3개월)", f"{forecast['ret_3m']:.2f}%")
+                st.info("6개월/1년 시나리오와 참고 금액은 확장 데이터 기능입니다.")
+            st.caption(f"시나리오 신호: {forecast['signal_label']} | 모델 신뢰도 참고값: {forecast['confidence']:.1f}%")
 
             r1 = investment_amount * (forecast["ret_1m"] / 100.0)
             r2 = investment_amount * (forecast["ret_2m"] / 100.0)
@@ -2449,16 +2458,16 @@ if run_requested:
             r12 = investment_amount * (forecast.get("ret_12m", np.nan) / 100.0)
             if is_premium:
                 a1, a2, a3, a4, a5 = st.columns(5)
-                a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
-                a2.metric("예상 손익(2M)", f"{r2:,.0f}")
-                a3.metric("예상 손익(3M)", f"{r3:,.0f}")
-                a4.metric("예상 손익(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
-                a5.metric("예상 손익(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
+                a1.metric(f"참고 금액 변화(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+                a2.metric("참고 금액 변화(2M)", f"{r2:,.0f}")
+                a3.metric("참고 금액 변화(3M)", f"{r3:,.0f}")
+                a4.metric("참고 금액 변화(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
+                a5.metric("참고 금액 변화(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
             else:
                 a1, a2, a3 = st.columns(3)
-                a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
-                a2.metric("예상 손익(2M)", f"{r2:,.0f}")
-                a3.metric("예상 손익(3M)", f"{r3:,.0f}")
+                a1.metric(f"참고 금액 변화(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+                a2.metric("참고 금액 변화(2M)", f"{r2:,.0f}")
+                a3.metric("참고 금액 변화(3M)", f"{r3:,.0f}")
 
             if is_premium and pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
                 s1, s2, s3 = st.columns(3)
@@ -2467,27 +2476,27 @@ if run_requested:
                 s3.metric("12M 비관 시나리오", f"{forecast['ret_12m_bear']:.2f}% / {investment_amount * (forecast['ret_12m_bear'] / 100.0):,.0f}")
             if pd.notna(forecast.get("mae", np.nan)):
                 m1, m2 = st.columns(2)
-                m1.metric("모델 MAE(일수익률)", f"{forecast['mae']:.3f}%")
+                m1.metric("모델 MAE(일간 변화율)", f"{forecast['mae']:.3f}%")
                 m2.metric("방향 정확도", f"{forecast.get('direction_acc', np.nan):.1f}%")
 
         d1, d2, d3 = st.columns(3)
-        d1.metric("통합 매수 점수", f"{decision['buy_score']:.1f}/100")
-        d2.metric("통합 매도 점수", f"{decision['sell_score']:.1f}/100")
-        d3.metric("판단", decision["decision_label"])
+        d1.metric("상승 조건 점수", f"{decision['buy_score']:.1f}/100")
+        d2.metric("하락 위험 점수", f"{decision['sell_score']:.1f}/100")
+        d3.metric("조건 해석", decision["decision_label"])
         comp = decision["component_scores"]
         st.caption(
             "조건 점수 | "
             f"추세+모멘텀 {comp['trend_momentum']:.0f}, "
             f"변동성 돌파 {comp['volatility_breakout']:.0f}, "
             f"상대강도 {comp['relative_strength']:.0f}, "
-            f"{'12M' if is_premium else '3M'} 예측 {comp['forecast_12m']:.0f}"
+            f"{'12M' if is_premium else '3M'} 시나리오 {comp['forecast_12m']:.0f}"
         )
         if is_premium:
             r1c, r2c, r3c = st.columns(3)
-            r1c.metric("예상 최대손실", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
-            r2c.metric("손익비", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
+            r1c.metric("하방 변동 참고값", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
+            r2c.metric("상하방 비율 참고값", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
             r3c.metric(
-                "매수 필수조건",
+                "상승 관찰 조건",
                 "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
             )
             cond = trade_setup["mandatory_conditions"]
@@ -2495,10 +2504,10 @@ if run_requested:
                 "필수조건 | "
                 f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
                 f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
-                f"6M·12M 예측 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
+                f"6M·12M 시나리오 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
             )
         else:
-            st.info("예상 최대손실, 손익비, 매수 필수조건 평가는 프리미엄 기능입니다.")
+            st.info("하방 변동 참고값, 상하방 비율, 상승 관찰 조건 평가는 확장 데이터 기능입니다.")
 
         equity, total_return, trade_count, win_rate = run_backtest(df_daily)
 
@@ -2533,28 +2542,28 @@ if run_requested:
                     st.write(ai_text)
             st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
         else:
-            st.info("AI 분석 요약은 프리미엄 기능입니다.")
+            st.info("AI 분석 요약은 확장 데이터 기능입니다.")
 
         if mobile_mode:
-            st.metric("백테스트 수익률", f"{total_return:.2f}%")
+            st.metric("과거 검증 변화율", f"{total_return:.2f}%")
             st.metric("거래 횟수", f"{trade_count}")
             st.metric("승률", f"{win_rate:.1f}%")
         else:
             b1, b2, b3 = st.columns(3)
-            b1.metric("백테스트 수익률", f"{total_return:.2f}%")
+            b1.metric("과거 검증 변화율", f"{total_return:.2f}%")
             b2.metric("거래 횟수", f"{trade_count}")
             b3.metric("승률", f"{win_rate:.1f}%")
 
-        st.subheader("전략 누적수익 곡선")
+        st.subheader("과거 조건 누적 변화 곡선")
         equity_df = equity.to_frame(name="Equity")
         st.line_chart(equity_df, use_container_width=True)
 
-        st.subheader("최근 신호")
+        st.subheader("최근 조건 신호")
         signal_table = df_daily.loc[df_daily["BuySignal"] | df_daily["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
         st.dataframe(signal_table, use_container_width=True)
-        st.caption("본 서비스는 데이터 분석 도구이며 투자자문 또는 투자 권유가 아닙니다. 모든 투자 판단과 손익 책임은 사용자에게 있습니다.")
+        st.warning(DISCLAIMER_TEXT, icon="⚠️")
 else:
     st.info(
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
-    st.caption("본 서비스는 데이터 분석 도구이며 투자자문 또는 투자 권유가 아닙니다. 모든 투자 판단과 손익 책임은 사용자에게 있습니다.")
+    st.warning(DISCLAIMER_TEXT, icon="⚠️")
