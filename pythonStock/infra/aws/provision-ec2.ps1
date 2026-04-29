@@ -7,6 +7,12 @@ param(
   [string]$SecretName = "pythonstock/app",
   [string]$OpenAIApiKey = "",
   [string]$PremiumAccessCode = "",
+  [string]$BillingEnabled = "false",
+  [string]$FreeDailyAnalyses = "3",
+  [string]$AnalysisCreditCost = "1",
+  [string]$AiCreditCost = "2",
+  [string]$AdminCreditCode = "",
+  [string]$AdminCreditGrant = "20",
   [string]$EnvFile = ""
 )
 
@@ -39,7 +45,13 @@ function Get-AppSecretText {
   param(
     [string]$EnvFilePath,
     [string]$OpenAI,
-    [string]$Premium
+    [string]$Premium,
+    [string]$Billing,
+    [string]$FreeDaily,
+    [string]$AnalysisCost,
+    [string]$AiCost,
+    [string]$AdminCode,
+    [string]$AdminGrant
   )
 
   if (-not [string]::IsNullOrWhiteSpace($EnvFilePath) -and (Test-Path -LiteralPath $EnvFilePath)) {
@@ -54,6 +66,12 @@ function Get-AppSecretText {
   return @"
 OPENAI_API_KEY=$(ConvertTo-DotEnvValue $OpenAI)
 PREMIUM_ACCESS_CODE=$(ConvertTo-DotEnvValue $Premium)
+BILLING_ENABLED=$(ConvertTo-DotEnvValue $Billing)
+FREE_DAILY_ANALYSES=$(ConvertTo-DotEnvValue $FreeDaily)
+ANALYSIS_CREDIT_COST=$(ConvertTo-DotEnvValue $AnalysisCost)
+AI_CREDIT_COST=$(ConvertTo-DotEnvValue $AiCost)
+ADMIN_CREDIT_CODE=$(ConvertTo-DotEnvValue $AdminCode)
+ADMIN_CREDIT_GRANT=$(ConvertTo-DotEnvValue $AdminGrant)
 STREAMLIT_SERVER_HEADLESS=true
 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 "@
@@ -111,7 +129,16 @@ if (-not $HasHttps) {
   aws ec2 authorize-security-group-ingress --region $Region --group-id $($SecurityGroup.GroupId) --protocol tcp --port 443 --cidr 0.0.0.0/0 | Out-Null
 }
 
-$SecretText = Get-AppSecretText -EnvFilePath $EnvFile -OpenAI $OpenAIApiKey -Premium $PremiumAccessCode
+$SecretText = Get-AppSecretText `
+  -EnvFilePath $EnvFile `
+  -OpenAI $OpenAIApiKey `
+  -Premium $PremiumAccessCode `
+  -Billing $BillingEnabled `
+  -FreeDaily $FreeDailyAnalyses `
+  -AnalysisCost $AnalysisCreditCost `
+  -AiCost $AiCreditCost `
+  -AdminCode $AdminCreditCode `
+  -AdminGrant $AdminCreditGrant
 $SecretTextPath = New-TempTextFile -Content $SecretText -FileName "app-secret.env"
 
 $ExistingSecretJson = $null

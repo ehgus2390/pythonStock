@@ -1,4 +1,5 @@
-﻿import datetime as dt
+import datetime as dt
+import hashlib
 import hmac
 import json
 import os
@@ -175,6 +176,12 @@ KRX_CACHE_PATH = Path(__file__).resolve().parent / "krx_universe_cache.json"
 KRX_SNAPSHOT_PATH = Path(__file__).resolve().parent / "krx_universe_snapshot.csv"
 KRX_CACHE_TTL_SEC = 60 * 60 * 24
 
+BILLING_PRODUCTS = {
+    "analysis_20": {"label": "분석 크레딧 20개", "credits": 20, "price_krw": 9900},
+    "analysis_60": {"label": "분석 크레딧 60개", "credits": 60, "price_krw": 24900},
+    "analysis_150": {"label": "분석 크레딧 150개", "credits": 150, "price_krw": 49900},
+}
+
 
 def _load_krx_cache_store() -> dict:
     if not KRX_CACHE_PATH.exists():
@@ -305,20 +312,28 @@ def get_us_universe_df() -> pd.DataFrame:
     return df
 
 
+def _default_app_state() -> dict:
+    return {"recent": [], "favorites": [], "users": {}}
+
+
 def load_user_state() -> dict:
     if not APP_STATE_PATH.exists():
-        return {"recent": [], "favorites": []}
+        return _default_app_state()
     try:
         with APP_STATE_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        recent = data.get("recent", [])
-        favorites = data.get("favorites", [])
-        return {
-            "recent": [str(x) for x in recent if str(x).strip()],
-            "favorites": [str(x) for x in favorites if str(x).strip()],
-        }
+        if not isinstance(data, dict):
+            return _default_app_state()
+        data.setdefault("recent", [])
+        data.setdefault("favorites", [])
+        data.setdefault("users", {})
+        if not isinstance(data["users"], dict):
+            data["users"] = {}
+        data["recent"] = [str(x) for x in data.get("recent", []) if str(x).strip()]
+        data["favorites"] = [str(x) for x in data.get("favorites", []) if str(x).strip()]
+        return data
     except Exception:
-        return {"recent": [], "favorites": []}
+        return _default_app_state()
 
 
 def save_user_state(state: dict) -> None:
@@ -337,6 +352,114 @@ def add_recent_symbol(state: dict, symbol: str, limit: int = 30) -> dict:
     recent = [sym] + [x for x in state.get("recent", []) if str(x).upper() != sym]
     state["recent"] = recent[:limit]
     return state
+
+
+def normalize_user_id(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^a-z0-9가-힣@._-]+", "", raw)
+    return normalized[:80]
+
+
+def _today_key() -> str:
+    return dt.date.today().isoformat()
+
+
+def get_or_create_user_record(app_state: dict, user_id: str) -> dict:
+    users = app_state.setdefault("users", {})
+    if not isinstance(users, dict):
+        app_state["users"] = {}
+        users = app_state["users"]
+    user_key = normalize_user_id(user_id) or "guest"
+    record = users.setdefault(
+        user_key,
+        {
+            "credits": 0,
+            "plan": "free",
+            "daily_usage": {},
+            "recent": app_state.get("recent", []) if user_key == "guest" else [],
+            "favorites": app_state.get("favorites", []) if user_key == "guest" else [],
+            "applied_grant_codes": [],
+        },
+    )
+    record.setdefault("credits", 0)
+    record.setdefault("plan", "free")
+    record.setdefault("daily_usage", {})
+    record.setdefault("recent", [])
+    record.setdefault("favorites", [])
+    record.setdefault("applied_grant_codes", [])
+    return record
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(_get_secret_or_env(name) or default)
+    except Exception:
+        return default
+
+
+def is_billing_enabled() -> bool:
+    value = _get_secret_or_env("BILLING_ENABLED").lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def get_billing_config() -> dict:
+    return {
+        "free_daily_analyses": max(0, _env_int("FREE_DAILY_ANALYSES", 3)),
+        "analysis_credit_cost": max(1, _env_int("ANALYSIS_CREDIT_COST", 1)),
+        "ai_credit_cost": max(1, _env_int("AI_CREDIT_COST", 2)),
+        "admin_credit_grant": max(1, _env_int("ADMIN_CREDIT_GRANT", 20)),
+    }
+
+
+def _grant_code_hash(code: str) -> str:
+    return hashlib.sha256(str(code).strip().encode("utf-8")).hexdigest()
+
+
+def apply_admin_credit_code(user_record: dict, code: str, grant_amount: int) -> tuple[bool, str]:
+    expected = _get_secret_or_env("ADMIN_CREDIT_CODE")
+    provided = str(code or "").strip()
+    if not expected:
+        return False, "관리자 충전 코드가 서버에 설정되어 있지 않습니다."
+    if not provided or not hmac.compare_digest(provided, expected):
+        return False, "충전 코드가 올바르지 않습니다."
+    code_hash = _grant_code_hash(provided)
+    applied = user_record.setdefault("applied_grant_codes", [])
+    if code_hash in applied:
+        return False, "이미 이 사용자에게 적용된 충전 코드입니다."
+    user_record["credits"] = int(user_record.get("credits", 0) or 0) + int(grant_amount)
+    applied.append(code_hash)
+    user_record["last_credit_grant_at"] = dt.datetime.utcnow().isoformat()
+    return True, f"{grant_amount} 크레딧이 충전되었습니다."
+
+
+def consume_user_feature(user_record: dict, feature: str, billing_config: dict) -> tuple[bool, str]:
+    today = _today_key()
+    daily_usage = user_record.setdefault("daily_usage", {})
+    today_usage = daily_usage.setdefault(today, {"analysis": 0, "ai_summary": 0})
+
+    if feature == "analysis":
+        used = int(today_usage.get("analysis", 0) or 0)
+        free_limit = int(billing_config["free_daily_analyses"])
+        if used < free_limit:
+            today_usage["analysis"] = used + 1
+            return True, f"오늘 무료 분석 {today_usage['analysis']}/{free_limit}회 사용"
+        cost = int(billing_config["analysis_credit_cost"])
+        label = "분석"
+    elif feature == "ai_summary":
+        cost = int(billing_config["ai_credit_cost"])
+        label = "AI 요약"
+    else:
+        return False, "지원하지 않는 과금 기능입니다."
+
+    credits = int(user_record.get("credits", 0) or 0)
+    if credits < cost:
+        return False, f"{label}에 필요한 크레딧이 부족합니다. 필요: {cost}, 보유: {credits}"
+    user_record["credits"] = credits - cost
+    if feature == "ai_summary":
+        today_usage["ai_summary"] = int(today_usage.get("ai_summary", 0) or 0) + 1
+    return True, f"{label} 크레딧 {cost}개 차감, 잔액 {user_record['credits']}개"
 
 
 def convert_to_krw(price: float, currency: str, usdkrw: float | None) -> float | None:
@@ -1830,9 +1953,51 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
 
 st.sidebar.header("설정")
-user_state = load_user_state()
-recent_symbols = user_state.get("recent", [])
-favorite_symbols = user_state.get("favorites", [])
+app_state = load_user_state()
+billing_enabled = is_billing_enabled()
+billing_config = get_billing_config()
+
+if "billing_user_id" not in st.session_state:
+    st.session_state["billing_user_id"] = ""
+
+st.sidebar.markdown("**사용자/과금**")
+user_id_input = st.sidebar.text_input(
+    "사용자 ID",
+    value=st.session_state["billing_user_id"],
+    placeholder="이메일 또는 닉네임",
+    help="사용자별 최근 종목, 즐겨찾기, 무료 사용량, 크레딧을 분리합니다.",
+)
+current_user_id = normalize_user_id(user_id_input)
+st.session_state["billing_user_id"] = current_user_id
+if billing_enabled and not current_user_id:
+    st.sidebar.warning("과금 모드에서는 사용자 ID가 필요합니다.")
+current_user_record = get_or_create_user_record(app_state, current_user_id or "guest")
+today_usage = current_user_record.setdefault("daily_usage", {}).setdefault(
+    _today_key(), {"analysis": 0, "ai_summary": 0}
+)
+st.sidebar.caption(
+    f"크레딧 {int(current_user_record.get('credits', 0) or 0)}개 | "
+    f"오늘 무료 분석 {int(today_usage.get('analysis', 0) or 0)}/{billing_config['free_daily_analyses']}회"
+)
+if billing_enabled:
+    grant_code = st.sidebar.text_input("크레딧 충전 코드", type="password", value="", placeholder="관리자/결제 코드")
+    if st.sidebar.button("크레딧 충전"):
+        ok, msg = apply_admin_credit_code(current_user_record, grant_code, billing_config["admin_credit_grant"])
+        save_user_state(app_state)
+        if ok:
+            st.sidebar.success(msg)
+            st.rerun()
+        else:
+            st.sidebar.warning(msg)
+    with st.sidebar.expander("크레딧 상품 예시", expanded=False):
+        for product in BILLING_PRODUCTS.values():
+            st.write(f"{product['label']}: {product['price_krw']:,}원")
+        st.caption("현재는 관리자 충전 코드 방식입니다. 이후 Toss/Stripe 결제 승인 후 자동 충전으로 교체합니다.")
+else:
+    st.sidebar.caption("과금 모드 꺼짐: `BILLING_ENABLED=true` 설정 시 사용자별 크레딧 차감이 활성화됩니다.")
+
+recent_symbols = current_user_record.get("recent", [])
+favorite_symbols = current_user_record.get("favorites", [])
 
 if "is_premium" not in st.session_state:
     st.session_state["is_premium"] = False
@@ -1852,7 +2017,10 @@ if st.session_state["is_premium"]:
         st.rerun()
 else:
     st.sidebar.caption("현재 플랜: 무료")
-is_premium = bool(st.session_state["is_premium"])
+has_credit_access = billing_enabled and int(current_user_record.get("credits", 0) or 0) > 0
+is_premium = bool(st.session_state["is_premium"] or has_credit_access)
+if billing_enabled and has_credit_access:
+    st.sidebar.caption("유료 크레딧 보유: 프리미엄 분석 기능 사용 가능")
 
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
@@ -2026,8 +2194,8 @@ if candidate_symbol:
             favs = [x for x in favs if x != cand_upper]
         else:
             favs = [cand_upper] + [x for x in favs if x != cand_upper]
-        user_state["favorites"] = favs[:50]
-        save_user_state(user_state)
+        current_user_record["favorites"] = favs[:50]
+        save_user_state(app_state)
         st.rerun()
 
 show_kosdaq_list = False
@@ -2108,6 +2276,17 @@ if run_requested:
     if not ticker:
         st.error("티커 또는 회사명을 입력하세요.")
         st.stop()
+    if billing_enabled and (analyze_clicked or bool(quick_symbol) or bool(kosdaq_selected_symbol)):
+        if not current_user_id:
+            st.error("사용자 ID를 입력해야 분석을 실행할 수 있습니다.")
+            st.stop()
+        ok, billing_msg = consume_user_feature(current_user_record, "analysis", billing_config)
+        save_user_state(app_state)
+        if not ok:
+            st.error(billing_msg)
+            st.info("크레딧 충전 코드가 있으면 왼쪽 사이드바에서 충전하세요.")
+            st.stop()
+        st.sidebar.success(billing_msg)
     st.session_state["last_analysis_request"] = {
         "ticker": ticker,
         "source": source,
@@ -2167,8 +2346,8 @@ if run_requested:
         st.caption(
             f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        user_state = add_recent_symbol(user_state, resolved_symbol, limit=30)
-        save_user_state(user_state)
+        current_user_record = add_recent_symbol(current_user_record, resolved_symbol, limit=30)
+        save_user_state(app_state)
 
         chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
@@ -2336,6 +2515,13 @@ if run_requested:
                 win_rate=win_rate,
             )
             if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
+                if billing_enabled:
+                    ok, billing_msg = consume_user_feature(current_user_record, "ai_summary", billing_config)
+                    save_user_state(app_state)
+                    if not ok:
+                        st.warning(billing_msg)
+                        st.stop()
+                    st.caption(billing_msg)
                 with st.spinner("AI가 계산 결과를 요약하는 중..."):
                     ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
                 if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
@@ -2369,8 +2555,3 @@ else:
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
     st.caption("본 서비스는 데이터 분석 도구이며 투자자문 또는 투자 권유가 아닙니다. 모든 투자 판단과 손익 책임은 사용자에게 있습니다.")
-
-
-
-
-

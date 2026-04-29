@@ -3,7 +3,13 @@ param(
   [string]$SecretName = "pythonstock/app",
   [string]$EnvFile = "",
   [string]$OpenAIApiKey = "",
-  [string]$PremiumAccessCode = ""
+  [string]$PremiumAccessCode = "",
+  [string]$BillingEnabled = "false",
+  [string]$FreeDailyAnalyses = "3",
+  [string]$AnalysisCreditCost = "1",
+  [string]$AiCreditCost = "2",
+  [string]$AdminCreditCode = "",
+  [string]$AdminCreditGrant = "20"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +28,12 @@ if (Test-Path -LiteralPath $EnvFile) {
   $SecretText = @"
 OPENAI_API_KEY=$OpenAIApiKey
 PREMIUM_ACCESS_CODE=$PremiumAccessCode
+BILLING_ENABLED=$BillingEnabled
+FREE_DAILY_ANALYSES=$FreeDailyAnalyses
+ANALYSIS_CREDIT_COST=$AnalysisCreditCost
+AI_CREDIT_COST=$AiCreditCost
+ADMIN_CREDIT_CODE=$AdminCreditCode
+ADMIN_CREDIT_GRANT=$AdminCreditGrant
 STREAMLIT_SERVER_HEADLESS=true
 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 "@
