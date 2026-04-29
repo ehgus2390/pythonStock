@@ -274,7 +274,7 @@ chown -R "${APP_USER}:${APP_USER}" "${DEPLOY_DIR}"
 run_as_app_user "pm2 startOrReload '${DEPLOY_DIR}/ecosystem.config.cjs' --update-env"
 run_as_app_user "pm2 save"
 systemctl restart pm2-ec2-user
-systemctl reload nginx
+systemctl reload nginx || systemctl restart nginx
 EOF
 
   chmod +x /usr/local/bin/pythonstock-deploy.sh
