@@ -2301,10 +2301,12 @@ if run_requested:
         st.subheader("최근 신호")
         signal_table = df_daily.loc[df_daily["BuySignal"] | df_daily["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
         st.dataframe(signal_table, use_container_width=True)
+        st.caption("본 서비스는 데이터 분석 도구이며 투자자문 또는 투자 권유가 아닙니다. 모든 투자 판단과 손익 책임은 사용자에게 있습니다.")
 else:
     st.info(
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
+    st.caption("본 서비스는 데이터 분석 도구이며 투자자문 또는 투자 권유가 아닙니다. 모든 투자 판단과 손익 책임은 사용자에게 있습니다.")
 
 
 
