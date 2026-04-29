@@ -30,13 +30,16 @@ STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 $TempPath = Join-Path $env:TEMP "pythonstock-app-secret.env"
 
 try {
-  Set-Content -LiteralPath $TempPath -Value $SecretText -Encoding utf8NoBOM
+  [System.IO.File]::WriteAllText($TempPath, $SecretText, [System.Text.UTF8Encoding]::new($false))
 
   $ExistingSecret = $null
   try {
-    $ExistingSecret = aws secretsmanager describe-secret `
+    $ExistingSecretJson = & aws secretsmanager describe-secret `
       --region $Region `
-      --secret-id $SecretName | ConvertFrom-Json
+      --secret-id $SecretName 2>$null
+    if ($LASTEXITCODE -eq 0 -and $ExistingSecretJson) {
+      $ExistingSecret = $ExistingSecretJson | ConvertFrom-Json
+    }
   } catch {
     $ExistingSecret = $null
   }

@@ -39,7 +39,28 @@ If `pythonStock\.env` already exists locally, the script reads it automatically:
 
 The script prints the `Secret ARN`. Use it as `-AppSecretArn` in bootstrap/deploy commands.
 
-## 2. Bootstrap EC2
+## 2. Create New EC2 And Bootstrap
+
+To create a dedicated EC2 instance for this app:
+
+```powershell
+cd C:\Users\ad\Documents\GitHub\pythonStock
+.\pythonStock\infra\aws\provision-ec2.ps1 `
+  -Region "ap-northeast-2" `
+  -Ec2InstanceType "t3.small"
+```
+
+This creates or reuses:
+
+- EC2 instance named `pythonstock-web`
+- Security group with `80/443` inbound
+- IAM role/profile for SSM and app secret read access
+- AWS Secrets Manager secret named `pythonstock/app`
+- Elastic IP tagged `pythonstock-eip`
+
+The script prints `EC2 InstanceId`, `EC2 Public IP`, and `App Secret ARN`.
+
+## 3. Bootstrap Existing EC2
 
 ```powershell
 cd C:\Users\ad\Documents\GitHub\pythonStock
@@ -60,7 +81,7 @@ The secret may be either `.env` text or JSON such as:
 }
 ```
 
-## 3. Deploy Updates
+## 4. Deploy Updates
 
 After pushing code to GitHub:
 
@@ -79,7 +100,7 @@ Or find the instance by tag:
   -Region "ap-northeast-2"
 ```
 
-## 4. Configure HTTPS
+## 5. Configure HTTPS
 
 Run this after the DNS record points to EC2:
 
@@ -91,7 +112,7 @@ Run this after the DNS record points to EC2:
   -Region "ap-northeast-2"
 ```
 
-## 5. Check App Logs
+## 6. Check App Logs
 
 From an SSM shell or SSH:
 
@@ -108,6 +129,6 @@ Restart only the app:
 sudo -u ec2-user PM2_HOME=/home/ec2-user/.pm2 pm2 restart pythonstock --update-env
 ```
 
-## 6. Streamlit Cloud
+## 7. Streamlit Cloud
 
 After EC2 is serving the site, stop or delete the Streamlit Cloud app from the Streamlit Cloud dashboard. The EC2 deployment does not depend on Streamlit Cloud.
