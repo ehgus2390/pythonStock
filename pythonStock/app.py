@@ -1930,7 +1930,10 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
     fig.update_layout(
         title=f"{ticker} Price / Signals",
-        template="plotly_white",
+        template="plotly_dark",
+        paper_bgcolor="#0b0f19",
+        plot_bgcolor="#0b0f19",
+        font=dict(color="#f4f7fb"),
         xaxis_rangeslider_visible=False,
         height=900 if mobile_mode else 980,
         legend=dict(orientation="h", y=1.02, x=0.01),
@@ -1939,8 +1942,8 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
         hovermode="x unified",
         uirevision="keep_pan_state",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#eef2f7")
-    fig.update_yaxes(showgrid=True, gridcolor="#eef2f7")
+    fig.update_xaxes(showgrid=True, gridcolor="#273244", zerolinecolor="#39465d")
+    fig.update_yaxes(showgrid=True, gridcolor="#273244", zerolinecolor="#39465d")
     fig.update_xaxes(fixedrange=False)
     fig.update_yaxes(fixedrange=mobile_mode)
 
