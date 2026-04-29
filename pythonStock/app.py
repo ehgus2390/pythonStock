@@ -1,4 +1,5 @@
 ﻿import datetime as dt
+import hmac
 import json
 import os
 import re
@@ -1448,6 +1449,21 @@ def _get_openai_api_key() -> str:
     return str(key or os.getenv("OPENAI_API_KEY", "")).strip()
 
 
+def _get_secret_or_env(name: str) -> str:
+    try:
+        value = st.secrets.get(name, "")
+    except Exception:
+        value = ""
+    return str(value or os.getenv(name, "")).strip()
+
+
+def verify_premium_code(code: str) -> bool:
+    expected = _get_secret_or_env("PREMIUM_ACCESS_CODE")
+    if not expected:
+        return False
+    return hmac.compare_digest(str(code).strip(), expected)
+
+
 def build_ai_analysis_payload(
     resolved_symbol: str,
     company_name: str,
@@ -1818,6 +1834,26 @@ user_state = load_user_state()
 recent_symbols = user_state.get("recent", [])
 favorite_symbols = user_state.get("favorites", [])
 
+if "is_premium" not in st.session_state:
+    st.session_state["is_premium"] = False
+
+st.sidebar.markdown("**멤버십**")
+premium_code = st.sidebar.text_input("프리미엄 코드", type="password", value="", placeholder="코드 입력")
+if st.sidebar.button("프리미엄 활성화"):
+    if verify_premium_code(premium_code):
+        st.session_state["is_premium"] = True
+        st.sidebar.success("프리미엄 기능이 활성화되었습니다.")
+    else:
+        st.sidebar.warning("프리미엄 코드가 올바르지 않습니다.")
+if st.session_state["is_premium"]:
+    st.sidebar.caption("현재 플랜: 프리미엄")
+    if st.sidebar.button("프리미엄 해제"):
+        st.session_state["is_premium"] = False
+        st.rerun()
+else:
+    st.sidebar.caption("현재 플랜: 무료")
+is_premium = bool(st.session_state["is_premium"])
+
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
     exchange_choice = st.sidebar.selectbox("거래소", ["전체", "KOSPI", "KOSDAQ", "KONEX"], index=0)
@@ -2034,7 +2070,10 @@ period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 view_mode = st.sidebar.selectbox("그래프 보기 단위", ["일별", "주별", "월별", "년별"], index=0)
 forecast_model_label = st.sidebar.selectbox("예측 모델", list(FORECAST_MODELS.keys()), index=0)
-forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", [3, 6, 12], index=2)
+forecast_horizon_options = [3, 6, 12] if is_premium else [3]
+forecast_horizon_months = st.sidebar.selectbox("예측 그래프 기간(개월)", forecast_horizon_options, index=len(forecast_horizon_options) - 1)
+if not is_premium:
+    st.sidebar.caption("6개월/12개월 예측은 프리미엄 기능입니다.")
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
@@ -2082,6 +2121,7 @@ if run_requested:
         "forecast_horizon_months": forecast_horizon_months,
         "investment_amount": float(investment_amount),
         "mobile_mode": bool(mobile_mode),
+        "is_premium": bool(is_premium),
     }
 elif "last_analysis_request" in st.session_state:
     req = st.session_state["last_analysis_request"]
@@ -2097,6 +2137,7 @@ elif "last_analysis_request" in st.session_state:
     forecast_horizon_months = int(req.get("forecast_horizon_months", forecast_horizon_months))
     investment_amount = float(req.get("investment_amount", investment_amount))
     mobile_mode = bool(req.get("mobile_mode", mobile_mode))
+    is_premium = bool(req.get("is_premium", is_premium))
     run_requested = True
 
 if run_requested:
@@ -2190,7 +2231,7 @@ if run_requested:
             col3.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
             col4.metric("최신 신호", signal_text)
 
-        if market == "KR":
+        if market == "KR" and is_premium:
             investor_ratio = get_kr_investor_ratio(resolved_symbol, lookback_days=60)
             if investor_ratio is not None:
                 i1, i2, i3, i4 = st.columns(4)
@@ -2200,14 +2241,23 @@ if run_requested:
                 i4.metric("개인 순매수(60일)", f"{investor_ratio['individual_net']:,.0f}")
             else:
                 st.caption("외국인/개인 수급 비율 데이터: N/A")
+        elif market == "KR":
+            st.info("외국인/개인 수급 분석은 프리미엄 기능입니다.")
 
         if forecast is not None:
-            p1, p2, p3, p4, p5 = st.columns(5)
-            p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
-            p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
-            p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
-            p4.metric("예상 수익률(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
-            p5.metric("예상 수익률(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
+            if is_premium:
+                p1, p2, p3, p4, p5 = st.columns(5)
+                p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
+                p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
+                p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
+                p4.metric("예상 수익률(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
+                p5.metric("예상 수익률(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
+            else:
+                p1, p2, p3 = st.columns(3)
+                p1.metric("예상 수익률(1개월)", f"{forecast['ret_1m']:.2f}%")
+                p2.metric("예상 수익률(2개월)", f"{forecast['ret_2m']:.2f}%")
+                p3.metric("예상 수익률(3개월)", f"{forecast['ret_3m']:.2f}%")
+                st.info("6개월/1년 예측과 시나리오 손익은 프리미엄 기능입니다.")
             st.caption(f"예측 신호: {forecast['signal_label']} | 추정 신뢰도: {forecast['confidence']:.1f}%")
 
             r1 = investment_amount * (forecast["ret_1m"] / 100.0)
@@ -2215,14 +2265,20 @@ if run_requested:
             r3 = investment_amount * (forecast["ret_3m"] / 100.0)
             r6 = investment_amount * (forecast.get("ret_6m", np.nan) / 100.0)
             r12 = investment_amount * (forecast.get("ret_12m", np.nan) / 100.0)
-            a1, a2, a3, a4, a5 = st.columns(5)
-            a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
-            a2.metric("예상 손익(2M)", f"{r2:,.0f}")
-            a3.metric("예상 손익(3M)", f"{r3:,.0f}")
-            a4.metric("예상 손익(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
-            a5.metric("예상 손익(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
+            if is_premium:
+                a1, a2, a3, a4, a5 = st.columns(5)
+                a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+                a2.metric("예상 손익(2M)", f"{r2:,.0f}")
+                a3.metric("예상 손익(3M)", f"{r3:,.0f}")
+                a4.metric("예상 손익(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
+                a5.metric("예상 손익(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
+            else:
+                a1, a2, a3 = st.columns(3)
+                a1.metric(f"예상 손익(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+                a2.metric("예상 손익(2M)", f"{r2:,.0f}")
+                a3.metric("예상 손익(3M)", f"{r3:,.0f}")
 
-            if pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
+            if is_premium and pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
                 s1, s2, s3 = st.columns(3)
                 s1.metric("12M 낙관 시나리오", f"{forecast['ret_12m_bull']:.2f}% / {investment_amount * (forecast['ret_12m_bull'] / 100.0):,.0f}")
                 s2.metric("12M 기준 시나리오", f"{forecast['ret_12m']:.2f}% / {investment_amount * (forecast['ret_12m'] / 100.0):,.0f}")
@@ -2242,47 +2298,53 @@ if run_requested:
             f"추세+모멘텀 {comp['trend_momentum']:.0f}, "
             f"변동성 돌파 {comp['volatility_breakout']:.0f}, "
             f"상대강도 {comp['relative_strength']:.0f}, "
-            f"12M 예측 {comp['forecast_12m']:.0f}"
+            f"{'12M' if is_premium else '3M'} 예측 {comp['forecast_12m']:.0f}"
         )
-        r1c, r2c, r3c = st.columns(3)
-        r1c.metric("예상 최대손실", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
-        r2c.metric("손익비", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
-        r3c.metric(
-            "매수 필수조건",
-            "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
-        )
-        cond = trade_setup["mandatory_conditions"]
-        st.caption(
-            "필수조건 | "
-            f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
-            f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
-            f"6M·12M 예측 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
-        )
+        if is_premium:
+            r1c, r2c, r3c = st.columns(3)
+            r1c.metric("예상 최대손실", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
+            r2c.metric("손익비", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
+            r3c.metric(
+                "매수 필수조건",
+                "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
+            )
+            cond = trade_setup["mandatory_conditions"]
+            st.caption(
+                "필수조건 | "
+                f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
+                f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
+                f"6M·12M 예측 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
+            )
+        else:
+            st.info("예상 최대손실, 손익비, 매수 필수조건 평가는 프리미엄 기능입니다.")
 
         equity, total_return, trade_count, win_rate = run_backtest(df_daily)
 
         st.subheader("AI 분석 요약")
-        ai_payload = build_ai_analysis_payload(
-            resolved_symbol=resolved_symbol,
-            company_name=company_name,
-            market=market,
-            latest=latest,
-            forecast=forecast,
-            decision=decision,
-            trade_setup=trade_setup,
-            investor_ratio=investor_ratio,
-            total_return=total_return,
-            trade_count=trade_count,
-            win_rate=win_rate,
-        )
-        if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
-            with st.spinner("AI가 계산 결과를 요약하는 중..."):
-                ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
-            if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
-                st.warning(ai_text)
-            else:
-                st.write(ai_text)
-        st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
+        if is_premium:
+            ai_payload = build_ai_analysis_payload(
+                resolved_symbol=resolved_symbol,
+                company_name=company_name,
+                market=market,
+                latest=latest,
+                forecast=forecast,
+                decision=decision,
+                trade_setup=trade_setup,
+                investor_ratio=investor_ratio,
+                total_return=total_return,
+                trade_count=trade_count,
+                win_rate=win_rate,
+            )
+            if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
+                with st.spinner("AI가 계산 결과를 요약하는 중..."):
+                    ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
+                if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
+                    st.warning(ai_text)
+                else:
+                    st.write(ai_text)
+            st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
+        else:
+            st.info("AI 분석 요약은 프리미엄 기능입니다.")
 
         if mobile_mode:
             st.metric("백테스트 수익률", f"{total_return:.2f}%")

@@ -2,6 +2,8 @@
 
 This guide runs the existing Streamlit app as a public website on EC2 behind Nginx.
 
+For the Dashboard-style AWS SSM deployment flow, use `pythonStock/infra/README.md`.
+
 ## 1. EC2 Baseline
 
 Recommended starter instance:
@@ -14,7 +16,8 @@ Recommended starter instance:
 
 ```bash
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3-pip git nginx
+sudo apt install -y python3.11 python3.11-venv python3-pip git nginx nodejs npm
+sudo npm install -g pm2
 ```
 
 ## 3. Clone And Install
@@ -37,6 +40,7 @@ nano .env
 ```
 
 Set `OPENAI_API_KEY` only if AI summaries should be enabled.
+Set `PREMIUM_ACCESS_CODE` to enable the temporary premium access-code flow before payment integration.
 
 ## 5. Test Manually
 
@@ -48,20 +52,20 @@ streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 
 Stop with `Ctrl+C` after testing.
 
-## 6. Install Systemd Service
+## 6. Run With PM2
 
 ```bash
-sudo cp /home/ubuntu/pythonStock/pythonStock/deploy/ec2/stock-web.service /etc/systemd/system/stock-web.service
-sudo systemctl daemon-reload
-sudo systemctl enable stock-web
-sudo systemctl start stock-web
-sudo systemctl status stock-web
+cd /home/ubuntu/pythonStock/pythonStock
+pm2 start .venv/bin/streamlit --name pythonstock -- run app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
+pm2 save
+pm2 startup
 ```
 
 Logs:
 
 ```bash
-journalctl -u stock-web -f
+pm2 status
+pm2 logs pythonstock
 ```
 
 ## 7. Configure Nginx
@@ -90,7 +94,7 @@ git pull
 cd /home/ubuntu/pythonStock/pythonStock
 source .venv/bin/activate
 pip install -r requirements.txt
-sudo systemctl restart stock-web
+pm2 restart pythonstock --update-env
 ```
 
 ## Notes For Monetization
