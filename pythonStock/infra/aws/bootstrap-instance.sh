@@ -122,7 +122,7 @@ Documentation=https://pm2.keymetrics.io/
 After=network.target
 
 [Service]
-Type=forking
+Type=simple
 User=${APP_USER}
 LimitNOFILE=infinity
 LimitNPROC=infinity
@@ -130,10 +130,9 @@ LimitCORE=infinity
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=PM2_HOME=${PM2_HOME_DIR}
 Environment=HOME=${APP_HOME}
-PIDFile=${PM2_HOME_DIR}/pm2.pid
 Restart=on-failure
 
-ExecStart=${pm2_bin} resurrect
+ExecStart=${pm2_bin} resurrect --no-daemon
 ExecReload=${pm2_bin} reload all
 ExecStop=${pm2_bin} kill
 
