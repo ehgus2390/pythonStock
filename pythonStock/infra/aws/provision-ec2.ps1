@@ -6,13 +6,6 @@ param(
   [string]$Ec2InstanceType = "t3.small",
   [string]$SecretName = "pythonstock/app",
   [string]$OpenAIApiKey = "",
-  [string]$PremiumAccessCode = "",
-  [string]$BillingEnabled = "false",
-  [string]$FreeDailyAnalyses = "3",
-  [string]$AnalysisCreditCost = "1",
-  [string]$AiCreditCost = "2",
-  [string]$AdminCreditCode = "",
-  [string]$AdminCreditGrant = "20",
   [string]$EnvFile = ""
 )
 
@@ -44,14 +37,7 @@ function ConvertTo-DotEnvValue([string]$Value) {
 function Get-AppSecretText {
   param(
     [string]$EnvFilePath,
-    [string]$OpenAI,
-    [string]$Premium,
-    [string]$Billing,
-    [string]$FreeDaily,
-    [string]$AnalysisCost,
-    [string]$AiCost,
-    [string]$AdminCode,
-    [string]$AdminGrant
+    [string]$OpenAI
   )
 
   if (-not [string]::IsNullOrWhiteSpace($EnvFilePath) -and (Test-Path -LiteralPath $EnvFilePath)) {
@@ -65,13 +51,6 @@ function Get-AppSecretText {
 
   return @"
 OPENAI_API_KEY=$(ConvertTo-DotEnvValue $OpenAI)
-PREMIUM_ACCESS_CODE=$(ConvertTo-DotEnvValue $Premium)
-BILLING_ENABLED=$(ConvertTo-DotEnvValue $Billing)
-FREE_DAILY_ANALYSES=$(ConvertTo-DotEnvValue $FreeDaily)
-ANALYSIS_CREDIT_COST=$(ConvertTo-DotEnvValue $AnalysisCost)
-AI_CREDIT_COST=$(ConvertTo-DotEnvValue $AiCost)
-ADMIN_CREDIT_CODE=$(ConvertTo-DotEnvValue $AdminCode)
-ADMIN_CREDIT_GRANT=$(ConvertTo-DotEnvValue $AdminGrant)
 STREAMLIT_SERVER_HEADLESS=true
 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 "@
@@ -131,14 +110,7 @@ if (-not $HasHttps) {
 
 $SecretText = Get-AppSecretText `
   -EnvFilePath $EnvFile `
-  -OpenAI $OpenAIApiKey `
-  -Premium $PremiumAccessCode `
-  -Billing $BillingEnabled `
-  -FreeDaily $FreeDailyAnalyses `
-  -AnalysisCost $AnalysisCreditCost `
-  -AiCost $AiCreditCost `
-  -AdminCode $AdminCreditCode `
-  -AdminGrant $AdminCreditGrant
+  -OpenAI $OpenAIApiKey
 $SecretTextPath = New-TempTextFile -Content $SecretText -FileName "app-secret.env"
 
 $ExistingSecretJson = $null

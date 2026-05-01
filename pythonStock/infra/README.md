@@ -25,10 +25,7 @@ cd C:\Users\ad\Documents\GitHub\pythonStock
 .\pythonStock\infra\aws\sync-app-secret.ps1 `
   -Region "ap-northeast-2" `
   -SecretName "pythonstock/app" `
-  -OpenAIApiKey "sk-..." `
-  -PremiumAccessCode "your-premium-code" `
-  -BillingEnabled "true" `
-  -AdminCreditCode "temporary-credit-code"
+  -OpenAIApiKey "sk-..."
 ```
 
 If `pythonStock\.env` already exists locally, the script reads it automatically:
@@ -77,30 +74,10 @@ The secret may be either `.env` text or JSON such as:
 ```json
 {
   "OPENAI_API_KEY": "sk-...",
-  "PREMIUM_ACCESS_CODE": "your-code",
-  "BILLING_ENABLED": "true",
-  "FREE_DAILY_ANALYSES": "3",
-  "ANALYSIS_CREDIT_COST": "1",
-  "AI_CREDIT_COST": "2",
-  "ADMIN_CREDIT_CODE": "temporary-credit-code",
-  "ADMIN_CREDIT_GRANT": "20",
   "STREAMLIT_SERVER_HEADLESS": "true",
   "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false"
 }
 ```
-
-## Billing Mode
-
-The app currently supports a first-stage user-based credit model:
-
-- Users enter a `사용자 ID` in the sidebar.
-- Recent symbols and favorites are stored per user.
-- Each user gets `FREE_DAILY_ANALYSES` free analyses per day.
-- After the free quota, each analysis consumes `ANALYSIS_CREDIT_COST` credits.
-- AI summaries consume `AI_CREDIT_COST` credits.
-- `ADMIN_CREDIT_CODE` grants `ADMIN_CREDIT_GRANT` credits once per user.
-
-This is a temporary credit-gating layer. For real payments, connect Toss Payments or Stripe checkout/webhook so successful payments add credits to the same user record.
 
 ## 4. Deploy Updates
 

@@ -40,7 +40,6 @@ nano .env
 ```
 
 Set `OPENAI_API_KEY` only if AI summaries should be enabled.
-Set `PREMIUM_ACCESS_CODE` to enable the temporary premium access-code flow before payment integration.
 
 ## 5. Test Manually
 

@@ -1,6 +1,4 @@
 import datetime as dt
-import hashlib
-import hmac
 import json
 import os
 import re
@@ -182,12 +180,6 @@ KRX_CACHE_PATH = Path(__file__).resolve().parent / "krx_universe_cache.json"
 KRX_SNAPSHOT_PATH = Path(__file__).resolve().parent / "krx_universe_snapshot.csv"
 KRX_CACHE_TTL_SEC = 60 * 60 * 24
 
-BILLING_PRODUCTS = {
-    "analysis_20": {"label": "분석 크레딧 20개", "credits": 20, "price_krw": 9900},
-    "analysis_60": {"label": "분석 크레딧 60개", "credits": 60, "price_krw": 24900},
-    "analysis_150": {"label": "분석 크레딧 150개", "credits": 150, "price_krw": 49900},
-}
-
 
 def _load_krx_cache_store() -> dict:
     if not KRX_CACHE_PATH.exists():
@@ -318,28 +310,20 @@ def get_us_universe_df() -> pd.DataFrame:
     return df
 
 
-def _default_app_state() -> dict:
-    return {"recent": [], "favorites": [], "users": {}}
-
-
 def load_user_state() -> dict:
     if not APP_STATE_PATH.exists():
-        return _default_app_state()
+        return {"recent": [], "favorites": []}
     try:
         with APP_STATE_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            return _default_app_state()
-        data.setdefault("recent", [])
-        data.setdefault("favorites", [])
-        data.setdefault("users", {})
-        if not isinstance(data["users"], dict):
-            data["users"] = {}
-        data["recent"] = [str(x) for x in data.get("recent", []) if str(x).strip()]
-        data["favorites"] = [str(x) for x in data.get("favorites", []) if str(x).strip()]
-        return data
+        recent = data.get("recent", [])
+        favorites = data.get("favorites", [])
+        return {
+            "recent": [str(x) for x in recent if str(x).strip()],
+            "favorites": [str(x) for x in favorites if str(x).strip()],
+        }
     except Exception:
-        return _default_app_state()
+        return {"recent": [], "favorites": []}
 
 
 def save_user_state(state: dict) -> None:
@@ -358,114 +342,6 @@ def add_recent_symbol(state: dict, symbol: str, limit: int = 30) -> dict:
     recent = [sym] + [x for x in state.get("recent", []) if str(x).upper() != sym]
     state["recent"] = recent[:limit]
     return state
-
-
-def normalize_user_id(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
-    normalized = re.sub(r"[^a-z0-9가-힣@._-]+", "", raw)
-    return normalized[:80]
-
-
-def _today_key() -> str:
-    return dt.date.today().isoformat()
-
-
-def get_or_create_user_record(app_state: dict, user_id: str) -> dict:
-    users = app_state.setdefault("users", {})
-    if not isinstance(users, dict):
-        app_state["users"] = {}
-        users = app_state["users"]
-    user_key = normalize_user_id(user_id) or "guest"
-    record = users.setdefault(
-        user_key,
-        {
-            "credits": 0,
-            "plan": "free",
-            "daily_usage": {},
-            "recent": app_state.get("recent", []) if user_key == "guest" else [],
-            "favorites": app_state.get("favorites", []) if user_key == "guest" else [],
-            "applied_grant_codes": [],
-        },
-    )
-    record.setdefault("credits", 0)
-    record.setdefault("plan", "free")
-    record.setdefault("daily_usage", {})
-    record.setdefault("recent", [])
-    record.setdefault("favorites", [])
-    record.setdefault("applied_grant_codes", [])
-    return record
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(_get_secret_or_env(name) or default)
-    except Exception:
-        return default
-
-
-def is_billing_enabled() -> bool:
-    value = _get_secret_or_env("BILLING_ENABLED").lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def get_billing_config() -> dict:
-    return {
-        "free_daily_analyses": max(0, _env_int("FREE_DAILY_ANALYSES", 3)),
-        "analysis_credit_cost": max(1, _env_int("ANALYSIS_CREDIT_COST", 1)),
-        "ai_credit_cost": max(1, _env_int("AI_CREDIT_COST", 2)),
-        "admin_credit_grant": max(1, _env_int("ADMIN_CREDIT_GRANT", 20)),
-    }
-
-
-def _grant_code_hash(code: str) -> str:
-    return hashlib.sha256(str(code).strip().encode("utf-8")).hexdigest()
-
-
-def apply_admin_credit_code(user_record: dict, code: str, grant_amount: int) -> tuple[bool, str]:
-    expected = _get_secret_or_env("ADMIN_CREDIT_CODE")
-    provided = str(code or "").strip()
-    if not expected:
-        return False, "관리자 충전 코드가 서버에 설정되어 있지 않습니다."
-    if not provided or not hmac.compare_digest(provided, expected):
-        return False, "충전 코드가 올바르지 않습니다."
-    code_hash = _grant_code_hash(provided)
-    applied = user_record.setdefault("applied_grant_codes", [])
-    if code_hash in applied:
-        return False, "이미 이 사용자에게 적용된 충전 코드입니다."
-    user_record["credits"] = int(user_record.get("credits", 0) or 0) + int(grant_amount)
-    applied.append(code_hash)
-    user_record["last_credit_grant_at"] = dt.datetime.utcnow().isoformat()
-    return True, f"{grant_amount} 크레딧이 충전되었습니다."
-
-
-def consume_user_feature(user_record: dict, feature: str, billing_config: dict) -> tuple[bool, str]:
-    today = _today_key()
-    daily_usage = user_record.setdefault("daily_usage", {})
-    today_usage = daily_usage.setdefault(today, {"analysis": 0, "ai_summary": 0})
-
-    if feature == "analysis":
-        used = int(today_usage.get("analysis", 0) or 0)
-        free_limit = int(billing_config["free_daily_analyses"])
-        if used < free_limit:
-            today_usage["analysis"] = used + 1
-            return True, f"오늘 무료 분석 {today_usage['analysis']}/{free_limit}회 사용"
-        cost = int(billing_config["analysis_credit_cost"])
-        label = "분석"
-    elif feature == "ai_summary":
-        cost = int(billing_config["ai_credit_cost"])
-        label = "AI 요약"
-    else:
-        return False, "지원하지 않는 과금 기능입니다."
-
-    credits = int(user_record.get("credits", 0) or 0)
-    if credits < cost:
-        return False, f"{label}에 필요한 크레딧이 부족합니다. 필요: {cost}, 보유: {credits}"
-    user_record["credits"] = credits - cost
-    if feature == "ai_summary":
-        today_usage["ai_summary"] = int(today_usage.get("ai_summary", 0) or 0) + 1
-    return True, f"{label} 크레딧 {cost}개 차감, 잔액 {user_record['credits']}개"
 
 
 def convert_to_krw(price: float, currency: str, usdkrw: float | None) -> float | None:
@@ -1578,21 +1454,6 @@ def _get_openai_api_key() -> str:
     return str(key or os.getenv("OPENAI_API_KEY", "")).strip()
 
 
-def _get_secret_or_env(name: str) -> str:
-    try:
-        value = st.secrets.get(name, "")
-    except Exception:
-        value = ""
-    return str(value or os.getenv(name, "")).strip()
-
-
-def verify_premium_code(code: str) -> bool:
-    expected = _get_secret_or_env("PREMIUM_ACCESS_CODE")
-    if not expected:
-        return False
-    return hmac.compare_digest(str(code).strip(), expected)
-
-
 def build_ai_analysis_payload(
     resolved_symbol: str,
     company_name: str,
@@ -1666,7 +1527,7 @@ def generate_ai_analysis(payload_json: str, model: str = "gpt-5.4-mini") -> str:
         err_name = type(exc).__name__
         err_text = str(exc).lower()
         if "rate" in err_text or "quota" in err_text or err_name in {"RateLimitError", "APIStatusError"}:
-            return "AI 요약을 생성하지 못했습니다. OpenAI 사용량 한도 또는 결제/쿼터 제한에 걸린 상태입니다. 잠시 후 다시 시도하거나 OpenAI 결제/사용량 설정을 확인하세요."
+            return "AI 요약을 생성하지 못했습니다. OpenAI API 사용량 한도 또는 쿼터 제한에 걸린 상태입니다. 잠시 후 다시 시도하거나 OpenAI API 설정을 확인하세요."
         return f"AI 요약을 생성하지 못했습니다. 오류 유형: {err_name}"
 
 
@@ -1964,75 +1825,9 @@ def build_chart(df: pd.DataFrame, ticker: str, mobile_mode: bool, forecast: dict
 
 
 st.sidebar.header("설정")
-app_state = load_user_state()
-billing_enabled = is_billing_enabled()
-billing_config = get_billing_config()
-
-if "billing_user_id" not in st.session_state:
-    st.session_state["billing_user_id"] = ""
-
-st.sidebar.markdown("**사용자/과금**")
-user_id_input = st.sidebar.text_input(
-    "사용자 ID",
-    value=st.session_state["billing_user_id"],
-    placeholder="이메일 또는 닉네임",
-    help="사용자별 최근 종목, 즐겨찾기, 무료 사용량, 크레딧을 분리합니다.",
-)
-current_user_id = normalize_user_id(user_id_input)
-st.session_state["billing_user_id"] = current_user_id
-if billing_enabled and not current_user_id:
-    st.sidebar.warning("과금 모드에서는 사용자 ID가 필요합니다.")
-current_user_record = get_or_create_user_record(app_state, current_user_id or "guest")
-today_usage = current_user_record.setdefault("daily_usage", {}).setdefault(
-    _today_key(), {"analysis": 0, "ai_summary": 0}
-)
-st.sidebar.caption(
-    f"크레딧 {int(current_user_record.get('credits', 0) or 0)}개 | "
-    f"오늘 무료 분석 {int(today_usage.get('analysis', 0) or 0)}/{billing_config['free_daily_analyses']}회"
-)
-if billing_enabled:
-    grant_code = st.sidebar.text_input("크레딧 충전 코드", type="password", value="", placeholder="관리자/결제 코드")
-    if st.sidebar.button("크레딧 충전"):
-        ok, msg = apply_admin_credit_code(current_user_record, grant_code, billing_config["admin_credit_grant"])
-        save_user_state(app_state)
-        if ok:
-            st.sidebar.success(msg)
-            st.rerun()
-        else:
-            st.sidebar.warning(msg)
-    with st.sidebar.expander("크레딧 상품 예시", expanded=False):
-        for product in BILLING_PRODUCTS.values():
-            st.write(f"{product['label']}: {product['price_krw']:,}원")
-        st.caption("현재는 관리자 충전 코드 방식입니다. 이후 Toss/Stripe 결제 승인 후 자동 충전으로 교체합니다.")
-        st.caption("결제는 데이터 편의 기능 이용권이며, 투자 추천 또는 수익 보장을 의미하지 않습니다.")
-else:
-    st.sidebar.caption("과금 모드 꺼짐: `BILLING_ENABLED=true` 설정 시 사용자별 크레딧 차감이 활성화됩니다.")
-
-recent_symbols = current_user_record.get("recent", [])
-favorite_symbols = current_user_record.get("favorites", [])
-
-if "is_premium" not in st.session_state:
-    st.session_state["is_premium"] = False
-
-st.sidebar.markdown("**확장 기능**")
-premium_code = st.sidebar.text_input("확장 기능 코드", type="password", value="", placeholder="코드 입력")
-if st.sidebar.button("확장 기능 활성화"):
-    if verify_premium_code(premium_code):
-        st.session_state["is_premium"] = True
-        st.sidebar.success("확장 데이터 기능이 활성화되었습니다.")
-    else:
-        st.sidebar.warning("확장 기능 코드가 올바르지 않습니다.")
-if st.session_state["is_premium"]:
-    st.sidebar.caption("현재 플랜: 확장 데이터")
-    if st.sidebar.button("확장 기능 해제"):
-        st.session_state["is_premium"] = False
-        st.rerun()
-else:
-    st.sidebar.caption("현재 플랜: 무료")
-has_credit_access = billing_enabled and int(current_user_record.get("credits", 0) or 0) > 0
-is_premium = bool(st.session_state["is_premium"] or has_credit_access)
-if billing_enabled and has_credit_access:
-    st.sidebar.caption("유료 크레딧 보유: 확장 데이터 기능 사용 가능")
+user_state = load_user_state()
+recent_symbols = user_state.get("recent", [])
+favorite_symbols = user_state.get("favorites", [])
 
 market = st.sidebar.selectbox("시장", ["US", "KR"], index=0)
 if market == "KR":
@@ -2206,8 +2001,8 @@ if candidate_symbol:
             favs = [x for x in favs if x != cand_upper]
         else:
             favs = [cand_upper] + [x for x in favs if x != cand_upper]
-        current_user_record["favorites"] = favs[:50]
-        save_user_state(app_state)
+        user_state["favorites"] = favs[:50]
+        save_user_state(user_state)
         st.rerun()
 
 show_kosdaq_list = False
@@ -2250,10 +2045,8 @@ period = st.sidebar.selectbox("기간", ["3mo", "6mo", "1y", "2y", "5y"], index=
 interval = st.sidebar.selectbox("봉 간격", ["1d", "1h"], index=0)
 view_mode = st.sidebar.selectbox("그래프 보기 단위", ["일별", "주별", "월별", "년별"], index=0)
 forecast_model_label = st.sidebar.selectbox("시나리오 모델", list(FORECAST_MODELS.keys()), index=0)
-forecast_horizon_options = [3, 6, 12] if is_premium else [3]
+forecast_horizon_options = [3, 6, 12]
 forecast_horizon_months = st.sidebar.selectbox("시나리오 그래프 기간(개월)", forecast_horizon_options, index=len(forecast_horizon_options) - 1)
-if not is_premium:
-    st.sidebar.caption("6개월/12개월 시나리오는 확장 데이터 기능입니다.")
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
@@ -2288,17 +2081,6 @@ if run_requested:
     if not ticker:
         st.error("티커 또는 회사명을 입력하세요.")
         st.stop()
-    if billing_enabled and (analyze_clicked or bool(quick_symbol) or bool(kosdaq_selected_symbol)):
-        if not current_user_id:
-            st.error("사용자 ID를 입력해야 분석을 실행할 수 있습니다.")
-            st.stop()
-        ok, billing_msg = consume_user_feature(current_user_record, "analysis", billing_config)
-        save_user_state(app_state)
-        if not ok:
-            st.error(billing_msg)
-            st.info("크레딧 충전 코드가 있으면 왼쪽 사이드바에서 충전하세요.")
-            st.stop()
-        st.sidebar.success(billing_msg)
     st.session_state["last_analysis_request"] = {
         "ticker": ticker,
         "source": source,
@@ -2312,7 +2094,6 @@ if run_requested:
         "forecast_horizon_months": forecast_horizon_months,
         "investment_amount": float(investment_amount),
         "mobile_mode": bool(mobile_mode),
-        "is_premium": bool(is_premium),
     }
 elif "last_analysis_request" in st.session_state:
     req = st.session_state["last_analysis_request"]
@@ -2328,7 +2109,6 @@ elif "last_analysis_request" in st.session_state:
     forecast_horizon_months = int(req.get("forecast_horizon_months", forecast_horizon_months))
     investment_amount = float(req.get("investment_amount", investment_amount))
     mobile_mode = bool(req.get("mobile_mode", mobile_mode))
-    is_premium = bool(req.get("is_premium", is_premium))
     run_requested = True
 
 if run_requested:
@@ -2358,8 +2138,8 @@ if run_requested:
         st.caption(
             f"입력 해석 방식: {source} | 데이터 소스: {data_source} | 업데이트 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        current_user_record = add_recent_symbol(current_user_record, resolved_symbol, limit=30)
-        save_user_state(app_state)
+        user_state = add_recent_symbol(user_state, resolved_symbol, limit=30)
+        save_user_state(user_state)
 
         chart = build_chart(df, resolved_symbol, mobile_mode, forecast)
         if chart is not None:
@@ -2422,7 +2202,7 @@ if run_requested:
             col3.metric("RSI(14)", f"{latest['RSI']:.2f}" if pd.notna(latest["RSI"]) else "N/A")
             col4.metric("최신 조건 신호", signal_text)
 
-        if market == "KR" and is_premium:
+        if market == "KR":
             investor_ratio = get_kr_investor_ratio(resolved_symbol, lookback_days=60)
             if investor_ratio is not None:
                 i1, i2, i3, i4 = st.columns(4)
@@ -2432,23 +2212,14 @@ if run_requested:
                 i4.metric("개인 순매수(60일)", f"{investor_ratio['individual_net']:,.0f}")
             else:
                 st.caption("외국인/개인 수급 비율 데이터: N/A")
-        elif market == "KR":
-            st.info("외국인/개인 수급 분석은 확장 데이터 기능입니다.")
 
         if forecast is not None:
-            if is_premium:
-                p1, p2, p3, p4, p5 = st.columns(5)
-                p1.metric("시나리오 변화율(1개월)", f"{forecast['ret_1m']:.2f}%")
-                p2.metric("시나리오 변화율(2개월)", f"{forecast['ret_2m']:.2f}%")
-                p3.metric("시나리오 변화율(3개월)", f"{forecast['ret_3m']:.2f}%")
-                p4.metric("시나리오 변화율(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
-                p5.metric("시나리오 변화율(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
-            else:
-                p1, p2, p3 = st.columns(3)
-                p1.metric("시나리오 변화율(1개월)", f"{forecast['ret_1m']:.2f}%")
-                p2.metric("시나리오 변화율(2개월)", f"{forecast['ret_2m']:.2f}%")
-                p3.metric("시나리오 변화율(3개월)", f"{forecast['ret_3m']:.2f}%")
-                st.info("6개월/1년 시나리오와 참고 금액은 확장 데이터 기능입니다.")
+            p1, p2, p3, p4, p5 = st.columns(5)
+            p1.metric("시나리오 변화율(1개월)", f"{forecast['ret_1m']:.2f}%")
+            p2.metric("시나리오 변화율(2개월)", f"{forecast['ret_2m']:.2f}%")
+            p3.metric("시나리오 변화율(3개월)", f"{forecast['ret_3m']:.2f}%")
+            p4.metric("시나리오 변화율(6개월)", f"{forecast.get('ret_6m', np.nan):.2f}%")
+            p5.metric("시나리오 변화율(1년)", f"{forecast.get('ret_12m', np.nan):.2f}%")
             st.caption(f"시나리오 신호: {forecast['signal_label']} | 모델 신뢰도 참고값: {forecast['confidence']:.1f}%")
 
             r1 = investment_amount * (forecast["ret_1m"] / 100.0)
@@ -2456,20 +2227,14 @@ if run_requested:
             r3 = investment_amount * (forecast["ret_3m"] / 100.0)
             r6 = investment_amount * (forecast.get("ret_6m", np.nan) / 100.0)
             r12 = investment_amount * (forecast.get("ret_12m", np.nan) / 100.0)
-            if is_premium:
-                a1, a2, a3, a4, a5 = st.columns(5)
-                a1.metric(f"참고 금액 변화(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
-                a2.metric("참고 금액 변화(2M)", f"{r2:,.0f}")
-                a3.metric("참고 금액 변화(3M)", f"{r3:,.0f}")
-                a4.metric("참고 금액 변화(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
-                a5.metric("참고 금액 변화(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
-            else:
-                a1, a2, a3 = st.columns(3)
-                a1.metric(f"참고 금액 변화(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
-                a2.metric("참고 금액 변화(2M)", f"{r2:,.0f}")
-                a3.metric("참고 금액 변화(3M)", f"{r3:,.0f}")
+            a1, a2, a3, a4, a5 = st.columns(5)
+            a1.metric(f"참고 금액 변화(1M, {investment_amount:,.0f})", f"{r1:,.0f}")
+            a2.metric("참고 금액 변화(2M)", f"{r2:,.0f}")
+            a3.metric("참고 금액 변화(3M)", f"{r3:,.0f}")
+            a4.metric("참고 금액 변화(6M)", f"{r6:,.0f}" if pd.notna(r6) else "N/A")
+            a5.metric("참고 금액 변화(1Y)", f"{r12:,.0f}" if pd.notna(r12) else "N/A")
 
-            if is_premium and pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
+            if pd.notna(forecast.get("ret_12m_bull", np.nan)) and pd.notna(forecast.get("ret_12m_bear", np.nan)):
                 s1, s2, s3 = st.columns(3)
                 s1.metric("12M 낙관 시나리오", f"{forecast['ret_12m_bull']:.2f}% / {investment_amount * (forecast['ret_12m_bull'] / 100.0):,.0f}")
                 s2.metric("12M 기준 시나리오", f"{forecast['ret_12m']:.2f}% / {investment_amount * (forecast['ret_12m'] / 100.0):,.0f}")
@@ -2489,60 +2254,47 @@ if run_requested:
             f"추세+모멘텀 {comp['trend_momentum']:.0f}, "
             f"변동성 돌파 {comp['volatility_breakout']:.0f}, "
             f"상대강도 {comp['relative_strength']:.0f}, "
-            f"{'12M' if is_premium else '3M'} 시나리오 {comp['forecast_12m']:.0f}"
+            f"12M 시나리오 {comp['forecast_12m']:.0f}"
         )
-        if is_premium:
-            r1c, r2c, r3c = st.columns(3)
-            r1c.metric("하방 변동 참고값", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
-            r2c.metric("상하방 비율 참고값", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
-            r3c.metric(
-                "상승 관찰 조건",
-                "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
-            )
-            cond = trade_setup["mandatory_conditions"]
-            st.caption(
-                "필수조건 | "
-                f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
-                f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
-                f"6M·12M 시나리오 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
-            )
-        else:
-            st.info("하방 변동 참고값, 상하방 비율, 상승 관찰 조건 평가는 확장 데이터 기능입니다.")
+        r1c, r2c, r3c = st.columns(3)
+        r1c.metric("하방 변동 참고값", f"{trade_setup['max_loss_pct']:.2f}% / {trade_setup['max_loss_amount']:,.0f}" if pd.notna(trade_setup["max_loss_pct"]) else "N/A")
+        r2c.metric("상하방 비율 참고값", f"{trade_setup['reward_risk_ratio']:.2f}" if pd.notna(trade_setup["reward_risk_ratio"]) else "N/A")
+        r3c.metric(
+            "상승 관찰 조건",
+            "통과" if trade_setup["mandatory_pass"] else f"{trade_setup['mandatory_pass_count']}/3 통과",
+        )
+        cond = trade_setup["mandatory_conditions"]
+        st.caption(
+            "필수조건 | "
+            f"추세 우상향 {'OK' if cond.get('trend_momentum') else 'NO'}, "
+            f"상대강도 우위 {'OK' if cond.get('relative_strength') else 'NO'}, "
+            f"6M·12M 시나리오 양수 {'OK' if cond.get('positive_mid_long_forecast') else 'NO'}"
+        )
 
         equity, total_return, trade_count, win_rate = run_backtest(df_daily)
 
         st.subheader("AI 분석 요약")
-        if is_premium:
-            ai_payload = build_ai_analysis_payload(
-                resolved_symbol=resolved_symbol,
-                company_name=company_name,
-                market=market,
-                latest=latest,
-                forecast=forecast,
-                decision=decision,
-                trade_setup=trade_setup,
-                investor_ratio=investor_ratio,
-                total_return=total_return,
-                trade_count=trade_count,
-                win_rate=win_rate,
-            )
-            if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
-                if billing_enabled:
-                    ok, billing_msg = consume_user_feature(current_user_record, "ai_summary", billing_config)
-                    save_user_state(app_state)
-                    if not ok:
-                        st.warning(billing_msg)
-                        st.stop()
-                    st.caption(billing_msg)
-                with st.spinner("AI가 계산 결과를 요약하는 중..."):
-                    ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
-                if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
-                    st.warning(ai_text)
-                else:
-                    st.write(ai_text)
-            st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
-        else:
-            st.info("AI 분석 요약은 확장 데이터 기능입니다.")
+        ai_payload = build_ai_analysis_payload(
+            resolved_symbol=resolved_symbol,
+            company_name=company_name,
+            market=market,
+            latest=latest,
+            forecast=forecast,
+            decision=decision,
+            trade_setup=trade_setup,
+            investor_ratio=investor_ratio,
+            total_return=total_return,
+            trade_count=trade_count,
+            win_rate=win_rate,
+        )
+        if st.button("AI 분석 요약 생성", key=f"ai_summary_{resolved_symbol}"):
+            with st.spinner("AI가 계산 결과를 요약하는 중..."):
+                ai_text = generate_ai_analysis(json.dumps(ai_payload, ensure_ascii=False, default=str))
+            if ai_text.startswith("AI 요약을 생성하지 못했습니다.") or ai_text.startswith("OPENAI_API_KEY") or ai_text.startswith("OpenAI 패키지"):
+                st.warning(ai_text)
+            else:
+                st.write(ai_text)
+        st.caption("AI 요약은 앱이 계산한 수치만 설명하며 투자 권유가 아닙니다.")
 
         if mobile_mode:
             st.metric("과거 검증 변화율", f"{total_return:.2f}%")
@@ -2567,3 +2319,4 @@ else:
         "왼쪽에서 시장/회사명(또는 티커)을 입력한 뒤 '분석 시작'을 누르세요. 예: 애플, 삼성전자, 한화에어로스페이스, AAPL, 005930, 로봇, 방산, 반도체"
     )
     st.warning(DISCLAIMER_TEXT, icon="⚠️")
+
