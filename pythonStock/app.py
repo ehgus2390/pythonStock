@@ -11,6 +11,12 @@ import requests
 import streamlit as st
 import yfinance as yf
 
+from src.strategy_metrics import (
+    backtest_with_costs,
+    score_history,
+    summarize_score_history,
+)
+
 try:
     from openai import OpenAI
 
@@ -1446,6 +1452,74 @@ def analyze_trade_setup(df: pd.DataFrame, forecast: dict | None, decision: dict,
     return out
 
 
+def infer_market_for_symbol(symbol: str, fallback: str) -> str:
+    base = symbol.split(".")[0]
+    if symbol.upper().endswith((".KS", ".KQ")) or (base.isdigit() and len(base) == 6):
+        return "KR"
+    return "US" if fallback == "KR" and not base.isdigit() else fallback
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def scan_symbol(
+    symbol: str,
+    market: str,
+    period: str,
+    kr_exchange: str,
+    exchange_choice: str,
+    forecast_model: str,
+    horizon_days: int,
+    day_key: str,
+) -> dict | None:
+    """Same calculation as the single-stock analysis, for one symbol in a batch scan."""
+    raw, _, resolved = fetch_price_data(symbol, market, period, "1d", kr_exchange)
+    if raw.empty or len(raw) < 65:
+        return None
+    df_daily = add_indicators(raw)
+    forecast = enrich_forecast(df_daily, build_forecast(df_daily, model_name=forecast_model, horizon_days=horizon_days))
+    decision = compute_decision_score(df_daily, forecast, market, exchange_choice)
+    setup = analyze_trade_setup(df_daily, forecast, decision, 1_000_000.0)
+    comp = decision["component_scores"]
+    latest = df_daily.iloc[-1]
+    return {
+        "symbol": resolved,
+        "close": float(latest["Close"]),
+        "rsi": float(latest["RSI"]) if pd.notna(latest["RSI"]) else np.nan,
+        "buy_score": decision["buy_score"],
+        "decision": decision["decision"],
+        "trend_momentum": comp["trend_momentum"],
+        "volatility_breakout": comp["volatility_breakout"],
+        "relative_strength": comp["relative_strength"],
+        "forecast_12m": comp["forecast_12m"],
+        "mandatory_pass_count": setup["mandatory_pass_count"],
+        "ret_12m": float(forecast.get("ret_12m", np.nan)) if forecast else np.nan,
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def validate_score_history(
+    symbol: str,
+    market: str,
+    kr_exchange: str,
+    exchange_choice: str,
+    forecast_model: str,
+    horizon_days: int,
+    step: int,
+    day_key: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Re-run the decision score on 5 years of history using only data available at each date."""
+    raw, _, _ = fetch_price_data(symbol, market, "5y", "1d", kr_exchange)
+    if raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    df_daily = add_indicators(raw)
+
+    def score_at(window: pd.DataFrame) -> dict:
+        forecast = enrich_forecast(window, build_forecast(window, model_name=forecast_model, horizon_days=horizon_days))
+        return compute_decision_score(window, forecast, market, exchange_choice)
+
+    history = score_history(df_daily, score_at, step=step, min_history=120, horizons=(20, 60))
+    return history, summarize_score_history(history, horizons=(20, 60))
+
+
 def _get_openai_api_key() -> str:
     try:
         key = st.secrets.get("OPENAI_API_KEY", "")
@@ -2050,8 +2124,72 @@ forecast_horizon_months = st.sidebar.selectbox("시나리오 그래프 기간(�
 investment_amount = st.sidebar.number_input("가정 투자금", min_value=100000.0, value=1000000.0, step=100000.0)
 mobile_mode = st.sidebar.toggle("모바일 최적화", value=True)
 
+with st.sidebar.expander("백테스트 비용 가정", expanded=False):
+    fee_pct = st.number_input("매매 수수료(%, 매수·매도 각각)", min_value=0.0, max_value=1.0, value=0.015, step=0.005, format="%.3f")
+    sell_tax_pct = st.number_input(
+        "매도 세금(%)", min_value=0.0, max_value=1.0, value=0.20 if market == "KR" else 0.0, step=0.01, format="%.2f"
+    )
+    st.caption("실제 수수료·세율은 증권사와 시점에 따라 다르니 본인 조건으로 바꿔 입력하세요.")
+
 analyze_clicked = st.sidebar.button("분석 시작")
 run_requested = analyze_clicked or bool(quick_symbol) or bool(kosdaq_selected_symbol)
+
+with st.expander("종목 일괄 스캔", expanded=False):
+    st.caption("아래 목록의 종목마다 단일 종목 분석과 같은 조건 점수·필수조건을 계산해 순위로 보여 줍니다. 왼쪽 기간·시나리오 모델 설정을 그대로 씁니다.")
+    scan_options = ["즐겨찾기", "직접 입력"] + (["KOSPI 50", "KOSDAQ 100"] if market == "KR" else [])
+    scan_universe = st.selectbox("스캔 대상", scan_options, key="scan_universe")
+    if scan_universe == "즐겨찾기":
+        scan_symbols = [(sym, infer_market_for_symbol(sym, market)) for sym in user_state.get("favorites", [])]
+    elif scan_universe == "직접 입력":
+        typed = st.text_area("티커 또는 6자리 종목코드 (쉼표·띄어쓰기·줄바꿈으로 구분)", key="scan_typed", placeholder="AAPL, MSFT, 005930, 000660")
+        typed_symbols = [s.strip().upper() for s in re.split(r"[\s,]+", typed) if s.strip()]
+        scan_symbols = [(sym, infer_market_for_symbol(sym, market)) for sym in dict.fromkeys(typed_symbols)]
+    else:
+        scan_key = "KOSPI50" if scan_universe == "KOSPI 50" else "KOSDAQ100"
+        scan_symbols = [(row["symbol"], "KR") for row in get_krx_index_constituents(scan_key) if row.get("symbol")]
+        if not scan_symbols:
+            st.warning("지수 구성종목을 불러오지 못했습니다. KRX 데이터 제공 방식이 바뀌어 현재 받아오지 못하는 상태일 수 있습니다. 즐겨찾기나 직접 입력을 이용하세요.")
+    st.caption(f"대상 {len(scan_symbols)}개 (최대 100개)")
+    if FORECAST_MODELS[forecast_model_label] != "baseline":
+        st.caption("ML 시나리오 모델은 종목마다 학습하므로 스캔 시간이 오래 걸립니다.")
+    if st.button("스캔 실행", key="scan_run", disabled=not scan_symbols):
+        progress = st.progress(0.0)
+        scan_rows = []
+        day_key = dt.date.today().isoformat()
+        for i, (sym, sym_market) in enumerate(scan_symbols[:100]):
+            try:
+                result = scan_symbol(
+                    sym,
+                    sym_market,
+                    period,
+                    kr_exchange,
+                    exchange_choice if sym_market == market else "전체",
+                    FORECAST_MODELS[forecast_model_label],
+                    forecast_horizon_months * 21,
+                    day_key,
+                )
+            except Exception:
+                result = None
+            if result:
+                result["name"] = get_company_name_by_symbol(result["symbol"], sym_market)
+                scan_rows.append(result)
+            progress.progress((i + 1) / min(len(scan_symbols), 100))
+        progress.empty()
+        if scan_rows:
+            scan_df = pd.DataFrame(scan_rows).sort_values(["buy_score", "mandatory_pass_count"], ascending=False)
+            scan_df = scan_df[[
+                "name", "symbol", "decision", "buy_score", "mandatory_pass_count", "trend_momentum",
+                "volatility_breakout", "relative_strength", "forecast_12m", "rsi", "ret_12m", "close",
+            ]].rename(columns={
+                "name": "종목명", "symbol": "티커", "decision": "판정", "buy_score": "상승 조건 점수",
+                "mandatory_pass_count": "필수조건 통과(3)", "trend_momentum": "추세+모멘텀",
+                "volatility_breakout": "변동성 돌파", "relative_strength": "상대강도", "forecast_12m": "12M 시나리오",
+                "rsi": "RSI(14)", "ret_12m": "12M 시나리오 변화율(%)", "close": "현재가",
+            })
+            st.dataframe(scan_df.round(2), use_container_width=True, hide_index=True)
+            st.caption(f"계산 성공 {len(scan_rows)}개 / 대상 {min(len(scan_symbols), 100)}개. 데이터를 받지 못한 종목은 제외했습니다.")
+        else:
+            st.info("계산할 수 있는 종목이 없었습니다.")
 
 if show_kosdaq_list:
     with st.expander("KOSDAQ 상장사 전체 목록", expanded=False):
@@ -2309,6 +2447,65 @@ if run_requested:
         st.subheader("과거 조건 누적 변화 곡선")
         equity_df = equity.to_frame(name="Equity")
         st.line_chart(equity_df, use_container_width=True)
+
+        st.subheader("보강 백테스트 (거래 기준·비용 반영)")
+        enhanced = backtest_with_costs(
+            df_daily,
+            fee_rate=fee_pct / 100.0,
+            sell_tax_rate=sell_tax_pct / 100.0,
+            benchmark_close=get_benchmark_close_series(market, exchange_choice, period="5y"),
+        )
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("비용 반영 수익률", f"{enhanced['total_return_net']:.2f}%", f"비용 전 {enhanced['total_return_gross']:.2f}%")
+        e2.metric("연환산 수익률(CAGR)", f"{enhanced['cagr_net']:.2f}%" if pd.notna(enhanced["cagr_net"]) else "N/A")
+        e3.metric("최대 낙폭(MDD)", f"{enhanced['max_drawdown_net']:.2f}%", f"보유 시 {enhanced['buy_hold_max_drawdown']:.2f}%", delta_color="off")
+        e4.metric("비용 반영 승률", f"{enhanced['win_rate_net']:.1f}%", f"거래 {enhanced['trade_count']}회", delta_color="off")
+        f1, f2, f3 = st.columns(3)
+        f1.metric("단순 보유 수익률", f"{enhanced['buy_hold_return']:.2f}%")
+        f2.metric(f"지수 수익률({get_benchmark_symbol(market, exchange_choice)})", f"{enhanced['benchmark_return']:.2f}%" if pd.notna(enhanced["benchmark_return"]) else "N/A")
+        f3.metric("보유 기간 비중", f"{enhanced['exposure_pct']:.1f}%")
+        st.line_chart(
+            pd.DataFrame({"비용 반영": enhanced["equity_net"], "비용 전": enhanced["equity_gross"]}),
+            use_container_width=True,
+        )
+        st.caption(
+            "RSI 30 상향 돌파일 종가에 진입, RSI 70 하향 돌파일 종가에 청산하는 기존 신호 규칙을 거래 단위로 계산합니다. "
+            f"수수료 {fee_pct:.3f}%(매수·매도 각각), 매도 세금 {sell_tax_pct:.2f}%를 반영했습니다."
+            + (" 마지막 신호 이후 아직 보유 중인 상태로 끝났습니다." if enhanced["open_position"] else "")
+        )
+
+        st.subheader("조건 점수 검증 (과거 5년)")
+        st.caption(
+            "과거 각 시점까지의 데이터만으로 현재와 같은 조건 점수를 다시 계산하고, 그 뒤 20·60거래일 동안 실제 가격이 어떻게 움직였는지 집계합니다. "
+            "현재 선택한 시나리오 모델과 기간 설정을 그대로 씁니다."
+        )
+        validation_step = 5 if FORECAST_MODELS[forecast_model_label] == "baseline" else 10
+        if st.button("점수 검증 실행", key=f"score_validation_{resolved_symbol}"):
+            with st.spinner("과거 시점마다 조건 점수를 다시 계산하는 중..."):
+                history, summary = validate_score_history(
+                    resolved_symbol,
+                    market,
+                    kr_exchange,
+                    exchange_choice,
+                    FORECAST_MODELS[forecast_model_label],
+                    forecast_horizon_months * 21,
+                    validation_step,
+                    dt.date.today().isoformat(),
+                )
+            if summary.empty:
+                st.info("검증할 과거 데이터가 부족합니다.")
+            else:
+                shown = summary.rename(columns={
+                    "decision": "당시 판정", "samples": "표본 수",
+                    "evaluated_20d": "20일 평가 수", "avg_return_20d": "20일 평균 변화율(%)", "rise_rate_20d": "20일 상승 비율(%)",
+                    "evaluated_60d": "60일 평가 수", "avg_return_60d": "60일 평균 변화율(%)", "rise_rate_60d": "60일 상승 비율(%)",
+                })
+                st.dataframe(shown.round(2), use_container_width=True, hide_index=True)
+                chart_df = history.set_index("date")[["buy_score"]].rename(columns={"buy_score": "상승 조건 점수"})
+                st.line_chart(chart_df, use_container_width=True)
+                st.caption(
+                    f"{validation_step}거래일 간격으로 {len(history)}개 시점을 계산했습니다. 과거 결과이며 앞으로도 같다는 보장은 없습니다."
+                )
 
         st.subheader("최근 조건 신호")
         signal_table = df_daily.loc[df_daily["BuySignal"] | df_daily["SellSignal"], ["Close", "RSI", "BuySignal", "SellSignal"]].tail(10)
