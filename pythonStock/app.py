@@ -181,7 +181,8 @@ THEME_US_SEEDS = {
 }
 
 
-APP_STATE_PATH = Path(__file__).resolve().parent / "user_state.json"
+# Favorites/recent symbols; APP_STATE_DIR points this at a persistent volume when the app directory is not kept.
+APP_STATE_PATH = Path(os.getenv("APP_STATE_DIR") or Path(__file__).resolve().parent) / "user_state.json"
 KRX_CACHE_PATH = Path(__file__).resolve().parent / "krx_universe_cache.json"
 KRX_SNAPSHOT_PATH = Path(__file__).resolve().parent / "krx_universe_snapshot.csv"
 KRX_CACHE_TTL_SEC = 60 * 60 * 24
